@@ -37,8 +37,7 @@ W, H = 720, 400
 PLOT_L, PLOT_T, PLOT_B = 64, 112, H - 52
 
 
-# --- data ----------------------------------------------------------------------
-
+#data
 def load():
     rows = list(csv.DictReader(open(DATA)))
     groups = defaultdict(list)
@@ -60,8 +59,7 @@ def median(groups, scenario, backend, column):
     return dict(sorted(out.items()))
 
 
-# --- svg helpers ---------------------------------------------------------------
-
+#svg helper
 def nice_ticks(vmax, target=5):
     raw = vmax / target
     mag = 10 ** math.floor(math.log10(raw))
@@ -133,8 +131,7 @@ def y_axis(t, ticks, plot_r, y_of, suffix=""):
     return parts
 
 
-# --- chart forms ---------------------------------------------------------------
-
+#chart forms
 def grouped_columns(theme, title, subtitle, y_label, x_title, cats, data, desc,
                     label="last", digits=None):
     """data: {series_key: {cat: value}}; cats: ordered x categories.
@@ -216,8 +213,7 @@ def lines(theme, title, subtitle, y_label, x_title, xs, data, desc, unit=""):
     return "\n".join(parts)
 
 
-# --- the charts ----------------------------------------------------------------
-
+#charts
 def main():
     if not DATA.exists():
         sys.exit(f"{DATA} not found - run scripts/bench.py first")
