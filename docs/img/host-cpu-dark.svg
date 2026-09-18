@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="400" viewBox="0 0 720 400" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, &quot;Segoe UI&quot;, sans-serif">
+<title id="title">Host CPU spent on polling</title>
+<desc id="desc">GPU poller (CUDA): 1 -&gt; 0, 2 -&gt; 0, 3 -&gt; 0, 4 -&gt; 0, 5 -&gt; 0; CPU fallback (host thread): 1 -&gt; 0.99, 2 -&gt; 1.99, 3 -&gt; 2.98, 4 -&gt; 3.96, 5 -&gt; 4.96</desc>
+<rect x="0.5" y="0.5" width="719" height="399" rx="12" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="24.0" y="36.0" fill="#ffffff" font-size="16" font-weight="600" text-anchor="start">Host CPU spent on polling</text>
+<text x="24.0" y="58.0" fill="#c3c2b7" font-size="13" font-weight="400" text-anchor="start">Cores busy in the poll path, 50 kpps per queue. The GPU poller uses none.</text>
+<rect x="24" y="72" width="12" height="12" rx="3" fill="#3987e5"/>
+<text x="42.0" y="82.0" fill="#c3c2b7" font-size="12" font-weight="400" text-anchor="start">GPU poller (CUDA)</text>
+<rect x="171.4" y="72" width="12" height="12" rx="3" fill="#d95926"/>
+<text x="189.4" y="82.0" fill="#c3c2b7" font-size="12" font-weight="400" text-anchor="start">CPU fallback (host thread)</text>
+<text x="24.0" y="96.0" fill="#898781" font-size="12" font-weight="400" text-anchor="start">cores</text>
+<line x1="64" y1="348.0" x2="696" y2="348.0" stroke="#383835" stroke-width="1"/>
+<text x="54" y="352.0" fill="#898781" font-size="12" text-anchor="end" style="font-variant-numeric: tabular-nums">0</text>
+<line x1="64" y1="300.8" x2="696" y2="300.8" stroke="#2c2c2a" stroke-width="1"/>
+<text x="54" y="304.8" fill="#898781" font-size="12" text-anchor="end" style="font-variant-numeric: tabular-nums">1</text>
+<line x1="64" y1="253.6" x2="696" y2="253.6" stroke="#2c2c2a" stroke-width="1"/>
+<text x="54" y="257.6" fill="#898781" font-size="12" text-anchor="end" style="font-variant-numeric: tabular-nums">2</text>
+<line x1="64" y1="206.4" x2="696" y2="206.4" stroke="#2c2c2a" stroke-width="1"/>
+<text x="54" y="210.4" fill="#898781" font-size="12" text-anchor="end" style="font-variant-numeric: tabular-nums">3</text>
+<line x1="64" y1="159.2" x2="696" y2="159.2" stroke="#2c2c2a" stroke-width="1"/>
+<text x="54" y="163.2" fill="#898781" font-size="12" text-anchor="end" style="font-variant-numeric: tabular-nums">4</text>
+<line x1="64" y1="112.0" x2="696" y2="112.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="54" y="116.0" fill="#898781" font-size="12" text-anchor="end" style="font-variant-numeric: tabular-nums">5</text>
+<path d="M102.2,348.0 V347.0 Q102.2,346.0 103.2,346.0 H125.2 Q126.2,346.0 126.2,347.0 V348.0 Z" fill="#3987e5"/>
+<path d="M128.2,348.0 V305.1 Q128.2,301.1 132.2,301.1 H148.2 Q152.2,301.1 152.2,305.1 V348.0 Z" fill="#d95926"/>
+<text x="127.2" y="368.0" fill="#898781" font-size="12" font-weight="400" text-anchor="middle">1</text>
+<path d="M228.6,348.0 V347.0 Q228.6,346.0 229.6,346.0 H251.6 Q252.6,346.0 252.6,347.0 V348.0 Z" fill="#3987e5"/>
+<path d="M254.6,348.0 V258.2 Q254.6,254.2 258.6,254.2 H274.6 Q278.6,254.2 278.6,258.2 V348.0 Z" fill="#d95926"/>
+<text x="253.6" y="368.0" fill="#898781" font-size="12" font-weight="400" text-anchor="middle">2</text>
+<path d="M355.0,348.0 V347.0 Q355.0,346.0 356.0,346.0 H378.0 Q379.0,346.0 379.0,347.0 V348.0 Z" fill="#3987e5"/>
+<path d="M381.0,348.0 V211.3 Q381.0,207.3 385.0,207.3 H401.0 Q405.0,207.3 405.0,211.3 V348.0 Z" fill="#d95926"/>
+<text x="380.0" y="368.0" fill="#898781" font-size="12" font-weight="400" text-anchor="middle">3</text>
+<path d="M481.4,348.0 V347.0 Q481.4,346.0 482.4,346.0 H504.4 Q505.4,346.0 505.4,347.0 V348.0 Z" fill="#3987e5"/>
+<path d="M507.4,348.0 V165.0 Q507.4,161.0 511.4,161.0 H527.4 Q531.4,161.0 531.4,165.0 V348.0 Z" fill="#d95926"/>
+<text x="506.4" y="368.0" fill="#898781" font-size="12" font-weight="400" text-anchor="middle">4</text>
+<path d="M607.8,348.0 V347.0 Q607.8,346.0 608.8,346.0 H630.8 Q631.8,346.0 631.8,347.0 V348.0 Z" fill="#3987e5"/>
+<text x="619.8" y="340.0" fill="#ffffff" font-size="12" font-weight="600" text-anchor="middle">0.00</text>
+<path d="M633.8,348.0 V118.0 Q633.8,114.0 637.8,114.0 H653.8 Q657.8,114.0 657.8,118.0 V348.0 Z" fill="#d95926"/>
+<text x="645.8" y="108.0" fill="#ffffff" font-size="12" font-weight="600" text-anchor="middle">4.96</text>
+<text x="632.8" y="368.0" fill="#898781" font-size="12" font-weight="400" text-anchor="middle">5</text>
+<text x="380.0" y="388.0" fill="#c3c2b7" font-size="12" font-weight="400" text-anchor="middle">queues</text>
+</svg>

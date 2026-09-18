@@ -78,6 +78,9 @@ struct SimStats {
     uint64_t overruns = 0;   ///< times the producer had to wait for a free slot
     uint64_t start_ns = 0;
     uint64_t end_ns   = 0;
+    /// Sampled H2D flushes (CUDA backend only; zero on the CPU fallback).
+    uint64_t copy_ns_sum  = 0;  ///< producer submit -> flush complete on device
+    uint64_t copy_samples = 0;  ///< flushes that contributed to copy_ns_sum
 };
 
 struct Simulator;  ///< opaque; owns the injection thread
@@ -88,12 +91,20 @@ struct Simulator;  ///< opaque; owns the injection thread
 void sim_publish(const CompletionRing& ring, uint64_t idx, uint64_t payload_offset,
                  uint32_t byte_len, uint32_t packet_id, uint64_t post_ns);
 
-/// Start the injection thread. `host_ring.descs` is the producer staging buffer;
-/// `device_descs` is what the poller reads (may alias host on the CPU backend).
-Simulator* sim_start(const CompletionRing& host_ring, CompletionDesc* device_descs,
+/// Start the injection thread for queue `queue`. `host_ring.descs` is the
+/// producer staging buffer; `device_descs` is what the poller reads (may alias
+/// host on the CPU backend). Simulators share no state, so one per queue can
+/// run concurrently; each numbers its packets from 0.
+Simulator* sim_start(uint32_t queue, const CompletionRing& host_ring, CompletionDesc* device_descs,
                      RingControl* ctrl, uint8_t* arena, size_t arena_bytes, const RunConfig& cfg);
 
-/// Join the injection thread and collect its counters. Frees the Simulator.
+/// Ask the injection thread to stop, without waiting. With several queues,
+/// signal them all before joining any, or later queues keep producing while
+/// earlier ones are being joined.
+void sim_request_stop(Simulator* sim);
+
+/// Stop (if not already asked), join the injection thread and collect its
+/// counters. Frees the Simulator.
 void sim_stop(Simulator* sim, SimStats& out);
 
 }  // namespace gnp

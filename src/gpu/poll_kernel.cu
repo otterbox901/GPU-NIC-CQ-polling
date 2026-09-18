@@ -1,9 +1,12 @@
 //
-// src/gpu/poll_kernel.cu - the persistent completion-queue poller.
+// src/gpu/poll_kernel.cu - the persistent completion-queue pollers.
 //
 // This is the heart of the project: a long-running CUDA kernel that watches the
-// completion ring from an SM and never asks the CPU for anything. The only
+// completion rings from SMs and never asks the CPU for anything. The only
 // host interaction is stop_flag + publish_limit, checked on the idle path.
+//
+// One launch covers every queue: <<<n_queues, 1>>>, block b owns queue b. The
+// blocks share nothing, so each one runs exactly the single-queue loop.
 //
 
 #include <cuda_runtime.h>
@@ -22,15 +25,23 @@ namespace {
 constexpr unsigned long long kPublishMask = 63ull;
 
 cudaStream_t g_stream = nullptr;
+PollQueue*   g_dev_queues = nullptr;  ///< device copy of the launch's PollQueue array
 
 }  // namespace
 
-/// Poll the ring until the host asks us to stop *and* we have reached the
-/// publish limit. Single-threaded on purpose: a CQ is consumed in order.
-__global__ void gnp_poll_kernel(CompletionRing ring, RingControl* ctrl, PollStats* stats,
+/// Block b polls queues[b] until the host asks it to stop *and* it has reached
+/// that queue's publish limit. One thread per block on purpose: a CQ is
+/// consumed in order, so width comes from more queues, not more lanes.
+__global__ void gnp_poll_kernel(const PollQueue* queues, unsigned int n_queues,
                                 long long clock_offset_ns, unsigned long long max_run_ns,
                                 unsigned int idle_backoff_ns) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (threadIdx.x != 0 || blockIdx.x >= n_queues) return;
+
+    // Read once at entry, never again: the hot loop below only touches this
+    // block's own ring/ctrl/stats, exactly as the single-queue kernel did.
+    const CompletionRing ring = queues[blockIdx.x].ring;
+    RingControl* const ctrl = queues[blockIdx.x].ctrl;
+    PollStats* const stats = queues[blockIdx.x].stats;
 
     // volatile => every load goes past the non-coherent L1. Producer stores
     // arrive from outside this SM (host mapped memory over PCIe).
@@ -123,17 +134,63 @@ __global__ void gnp_poll_kernel(CompletionRing ring, RingControl* ctrl, PollStat
     __threadfence_system();
 }
 
-bool backend_launch_poller(const CompletionRing& ring, RingControl* ctrl, PollStats* stats,
-                           int64_t clock_offset_ns, const RunConfig& cfg) {
+uint32_t backend_max_queues() {
+    int device = 0;
+    GNP_CUDA_CHECK(cudaGetDevice(&device));
+    int sms = 0;
+    GNP_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
+
+    // Must match the real launch: 1 thread per block, no dynamic shared memory.
+    // The binding limit for this tiny kernel is the per-SM resident-block cap.
+    int blocks_per_sm = 0;
+    GNP_CUDA_CHECK(
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, gnp_poll_kernel, 1, 0));
+
+    return static_cast<uint32_t>(blocks_per_sm) * static_cast<uint32_t>(sms);
+}
+
+bool backend_launch_poller(const PollQueue* queues, uint32_t n_queues, int64_t clock_offset_ns,
+                           const RunConfig& cfg) {
+    // session_create already enforces this; re-check because a launch past the
+    // residency limit does not fail - it hangs forever in backend_wait_poller.
+    const uint32_t max_queues = backend_max_queues();
+    if (n_queues == 0 || n_queues > max_queues) {
+        std::fprintf(stderr,
+                     "[gnp] refusing to launch %u persistent pollers: at most %u can be resident "
+                     "at once on this device, and a non-resident poller would never start\n",
+                     n_queues, max_queues);
+        return false;
+    }
+
     if (!g_stream) {
         GNP_CUDA_CHECK(cudaStreamCreateWithFlags(&g_stream, cudaStreamNonBlocking));
     }
 
+    if (g_dev_queues) {
+        GNP_CUDA_CHECK(cudaFree(g_dev_queues));
+        g_dev_queues = nullptr;
+    }
+    const size_t bytes = static_cast<size_t>(n_queues) * sizeof(PollQueue);
+    GNP_CUDA_CHECK(cudaMalloc(&g_dev_queues, bytes));
+    GNP_CUDA_CHECK(cudaMemcpy(g_dev_queues, queues, bytes, cudaMemcpyHostToDevice));
+
     const unsigned long long max_run_ns =
         (static_cast<unsigned long long>(cfg.duration_ms) + 5000ull) * 1000000ull;
 
-    gnp_poll_kernel<<<1, 1, 0, g_stream>>>(ring, ctrl, stats, clock_offset_ns, max_run_ns,
-                                           cfg.idle_backoff_ns);
+    if (cfg.verbose) {
+        int device = 0;
+        int sms = 0;
+        GNP_CUDA_CHECK(cudaGetDevice(&device));
+        GNP_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, device));
+        std::printf("[gnp] launching <<<%u, 1>>>: %u poller(s), max resident %u (%u SMs)%s\n",
+                    n_queues, n_queues, max_queues, static_cast<unsigned>(sms),
+                    n_queues > static_cast<uint32_t>(sms)
+                        ? " - more pollers than SMs, some will share a warp scheduler"
+                        : "");
+    }
+
+    gnp_poll_kernel<<<n_queues, 1, 0, g_stream>>>(g_dev_queues, n_queues, clock_offset_ns,
+                                                  max_run_ns, cfg.idle_backoff_ns);
 
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
@@ -154,7 +211,11 @@ bool backend_wait_poller() {
 }
 
 void backend_shutdown() {
-    backend_fini_copy();
+    backend_teardown_copy();
+    if (g_dev_queues) {
+        cudaFree(g_dev_queues);
+        g_dev_queues = nullptr;
+    }
     if (g_stream) {
         cudaStreamDestroy(g_stream);
         g_stream = nullptr;

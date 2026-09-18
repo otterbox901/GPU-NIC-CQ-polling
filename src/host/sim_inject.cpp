@@ -7,8 +7,13 @@
 //
 
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <thread>
+
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 #include "gnp/common.hpp"
 #include "gnp/gpu_poll.hpp"
@@ -62,8 +67,8 @@ struct Simulator {
 
 namespace {
 
-void inject_loop(Simulator* sim, CompletionRing host_ring, CompletionDesc* device_descs,
-                 RingControl* ctrl, uint8_t* arena, RunConfig cfg) {
+void inject_loop(Simulator* sim, uint32_t queue, CompletionRing host_ring,
+                 CompletionDesc* device_descs, RingControl* ctrl, uint8_t* arena, RunConfig cfg) {
     const uint32_t burst = cfg.burst ? cfg.burst : 1u;
     const uint64_t interval_ns =
         cfg.target_pps ? (1000000000ull * burst) / cfg.target_pps : 0ull;
@@ -81,7 +86,7 @@ void inject_loop(Simulator* sim, CompletionRing host_ring, CompletionDesc* devic
         const uint64_t n = produced - flushed;
         if (n == 0) return;
         if (!force && n < kFlushBatch) return;
-        backend_flush_descs(host_ring.descs, device_descs, host_ring.capacity, flushed,
+        backend_flush_descs(queue, host_ring.descs, device_descs, host_ring.capacity, flushed,
                             static_cast<uint32_t>(n));
         flushed = produced;
     };
@@ -125,7 +130,8 @@ void inject_loop(Simulator* sim, CompletionRing host_ring, CompletionDesc* devic
 
 done:
     flush_available(true);
-    backend_flush_wait();
+    backend_flush_wait(queue);
+    backend_copy_stats(queue, sim->stats);
     sim->stats.produced = produced;
     sim->stats.overruns = overruns;
     sim->stats.end_ns = host_now_ns();
@@ -133,19 +139,31 @@ done:
 
 }  // namespace
 
-Simulator* sim_start(const CompletionRing& host_ring, CompletionDesc* device_descs,
+Simulator* sim_start(uint32_t queue, const CompletionRing& host_ring, CompletionDesc* device_descs,
                      RingControl* ctrl, uint8_t* arena, size_t arena_bytes, const RunConfig& cfg) {
     if (!host_ring.descs || !device_descs || !ctrl || !arena) return nullptr;
     if (arena_bytes < static_cast<size_t>(host_ring.capacity) * cfg.payload_bytes) return nullptr;
 
     auto* sim = new Simulator();
-    sim->thread = std::thread(inject_loop, sim, host_ring, device_descs, ctrl, arena, cfg);
+    sim->thread =
+        std::thread(inject_loop, sim, queue, host_ring, device_descs, ctrl, arena, cfg);
+#if defined(__linux__)
+    // Visible in top -H and /proc/<pid>/task/*/comm; scripts/bench.py uses it
+    // to attribute CPU time to producers vs pollers.
+    char name[16];
+    std::snprintf(name, sizeof(name), "gnp-prod-%u", queue);
+    pthread_setname_np(sim->thread.native_handle(), name);
+#endif
     return sim;
+}
+
+void sim_request_stop(Simulator* sim) {
+    if (sim) sim->stop.store(true, std::memory_order_relaxed);
 }
 
 void sim_stop(Simulator* sim, SimStats& out) {
     if (!sim) return;
-    sim->stop.store(true, std::memory_order_relaxed);
+    sim_request_stop(sim);
     if (sim->thread.joinable()) sim->thread.join();
     out = sim->stats;
     delete sim;

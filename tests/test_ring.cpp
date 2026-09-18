@@ -1,5 +1,6 @@
 //
-// tests/test_ring.cpp - the owner-bit protocol, exercised on plain host memory.
+// tests/test_ring.cpp - the owner-bit protocol, ring independence (the basis of
+// multi-queue) and the report's cross-queue aggregation, on plain host memory.
 //
 // No GPU and no CUDA toolkit needed: the index math in ring.hpp is the same
 // code the kernel runs, so testing it here catches real protocol bugs.
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "gnp/common.hpp"
+#include "gnp/metrics.hpp"
 #include "gnp/ring.hpp"
 
 namespace {
@@ -128,6 +130,98 @@ void test_full_ring_then_drain() {
     }
 }
 
+/// Multi-queue rests on rings sharing nothing. Drive two rings of different
+/// sizes at different rates, interleaved, and check neither sees the other's
+/// traffic: each keeps its own ids, owner phase and empty/ready state.
+void test_independent_rings() {
+    std::vector<gnp::CompletionDesc> storage_a;
+    std::vector<gnp::CompletionDesc> storage_b;
+    const gnp::CompletionRing a = make_ring(storage_a, 8, 3);
+    const gnp::CompletionRing b = make_ring(storage_b, 16, 4);
+
+    uint64_t produced_a = 0, consumed_a = 0;
+    uint64_t produced_b = 0, consumed_b = 0;
+
+    for (int step = 0; step < 100; ++step) {
+        // Ring A gets one entry per step, ring B three: they wrap at different
+        // times, so their owner phases drift apart.
+        gnp::sim_publish(a, produced_a, produced_a * 64, 100, static_cast<uint32_t>(produced_a),
+                         gnp::host_now_ns());
+        ++produced_a;
+        for (int k = 0; k < 3; ++k) {
+            gnp::sim_publish(b, produced_b, produced_b * 64, 200,
+                             static_cast<uint32_t>(1000000 + produced_b), gnp::host_now_ns());
+            ++produced_b;
+        }
+
+        while (consumed_a < produced_a) {
+            const gnp::CompletionDesc& d = a.descs[gnp::ring_slot(a, consumed_a)];
+            CHECK(gnp::desc_ready(d.status, gnp::ring_expected_owner(a, consumed_a)));
+            CHECK(d.packet_id == static_cast<uint32_t>(consumed_a));
+            CHECK(d.byte_len == 100);
+            ++consumed_a;
+        }
+        while (consumed_b < produced_b) {
+            const gnp::CompletionDesc& d = b.descs[gnp::ring_slot(b, consumed_b)];
+            CHECK(gnp::desc_ready(d.status, gnp::ring_expected_owner(b, consumed_b)));
+            CHECK(d.packet_id == static_cast<uint32_t>(1000000 + consumed_b));
+            CHECK(d.byte_len == 200);
+            ++consumed_b;
+        }
+
+        // Both drained: the next slot of each must read empty, whatever the
+        // other ring just did.
+        CHECK(!gnp::desc_ready(a.descs[gnp::ring_slot(a, produced_a)].status,
+                               gnp::ring_expected_owner(a, produced_a)));
+        CHECK(!gnp::desc_ready(b.descs[gnp::ring_slot(b, produced_b)].status,
+                               gnp::ring_expected_owner(b, produced_b)));
+    }
+    CHECK(consumed_a == 100);
+    CHECK(consumed_b == 300);
+}
+
+/// The report's aggregate: counters sum, latency pools, run time is the max
+/// (pollers run concurrently), and an idle queue must not drag min to zero.
+void test_stats_aggregate() {
+    gnp::PollStats q[3];
+    for (gnp::PollStats& s : q) gnp::stats_reset(s);
+
+    q[0].packets = 10; q[0].bytes = 1000; q[0].idle_spins = 5; q[0].gaps = 0;
+    q[0].lat_sum_ns = 400; q[0].lat_samples = 4; q[0].lat_min_ns = 50; q[0].lat_max_ns = 200;
+    q[0].run_ns = 1000;
+
+    q[1].packets = 30; q[1].bytes = 3000; q[1].idle_spins = 7; q[1].gaps = 2;
+    q[1].lat_sum_ns = 1200; q[1].lat_samples = 6; q[1].lat_min_ns = 30; q[1].lat_max_ns = 500;
+    q[1].run_ns = 1500;
+
+    // q[2]: saw nothing. lat_min_ns stays at its ~0 sentinel, lat_samples 0.
+
+    const gnp::PollStats a = gnp::stats_aggregate(q, 3);
+    CHECK(a.packets == 40);
+    CHECK(a.bytes == 4000);
+    CHECK(a.idle_spins == 12);
+    CHECK(a.gaps == 2);
+    CHECK(a.lat_sum_ns == 1600);
+    CHECK(a.lat_samples == 10);
+    CHECK(a.lat_min_ns == 30);
+    CHECK(a.lat_max_ns == 500);
+    CHECK(a.run_ns == 1500);
+
+    // A single queue must aggregate to itself, so N=1 reports are unchanged.
+    const gnp::PollStats one = gnp::stats_aggregate(q, 1);
+    CHECK(std::memcmp(&one, &q[0], sizeof(gnp::PollStats)) == 0);
+
+    gnp::SimStats s[3];
+    s[0].produced = 10; s[0].overruns = 1; s[0].start_ns = 100; s[0].end_ns = 900;
+    s[1].produced = 30; s[1].overruns = 0; s[1].start_ns = 50;  s[1].end_ns = 800;
+    // s[2]: producer never ran (zero window) - must not widen the window.
+    const gnp::SimStats sa = gnp::sim_aggregate(s, 3);
+    CHECK(sa.produced == 40);
+    CHECK(sa.overruns == 1);
+    CHECK(sa.start_ns == 50);
+    CHECK(sa.end_ns == 900);
+}
+
 }  // namespace
 
 int main() {
@@ -136,6 +230,8 @@ int main() {
     test_zeroed_ring_is_empty();
     test_publish_consume_wraps();
     test_full_ring_then_drain();
+    test_independent_rings();
+    test_stats_aggregate();
 
     if (g_failures) {
         std::fprintf(stderr, "\n%d check(s) failed\n", g_failures);

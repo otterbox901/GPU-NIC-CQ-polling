@@ -28,8 +28,19 @@ struct PollStats {
 
 void stats_reset(PollStats& s);
 
-/// Print the end-of-run summary to stdout.
-void report(const RunConfig& cfg, const PollStats& poll, const SimStats& sim,
+/// Combine per-queue stats into one aggregate. Counters are summed; latency is
+/// pooled (min of mins, max of maxes, total sum / total samples); run_ns is the
+/// longest-running poller, since pollers run concurrently, not back to back.
+PollStats stats_aggregate(const PollStats* poll, uint32_t n_queues);
+
+/// Combine per-queue producer stats: counts summed, time window is the union.
+SimStats sim_aggregate(const SimStats* sim, uint32_t n_queues);
+
+/// Print the end-of-run summary to stdout. `poll` and `sim` hold one entry per
+/// queue. The top sections always describe the aggregate with the same labels
+/// as a single-queue run (scripts/run_sim.sh parses them); with more than one
+/// queue a per-queue breakdown follows.
+void report(const RunConfig& cfg, const PollStats* poll, const SimStats* sim, uint32_t n_queues,
             const char* backend, int64_t clock_offset_ns);
 
 }  // namespace gnp

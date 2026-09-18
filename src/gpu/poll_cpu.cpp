@@ -1,6 +1,8 @@
 //
 // src/gpu/poll_cpu.cpp - CPU-thread stand-in for the persistent CUDA kernel.
 //
+// One thread per queue, mirroring one block per queue on the GPU.
+//
 
 #include <atomic>
 #include <cstdio>
@@ -8,6 +10,11 @@
 #include <cstring>
 #include <new>
 #include <thread>
+#include <vector>
+
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 
 #include "gnp/common.hpp"
 #include "gnp/gpu_poll.hpp"
@@ -17,7 +24,11 @@ namespace {
 
 constexpr unsigned long long kPublishMask = 63ull;
 
-std::thread g_poller;
+/// Threads are preemptible, so nothing deadlocks past this; it only stops a
+/// typo like --queues 100000 from spawning 200k spinning threads.
+constexpr uint32_t kMaxQueues = 256;
+
+std::vector<std::thread> g_pollers;
 
 void poll_loop(CompletionRing ring, RingControl* ctrl, PollStats* stats,
                unsigned long long max_run_ns, unsigned int idle_backoff_ns) {
@@ -127,15 +138,18 @@ void backend_free_ring(CompletionDesc* host, CompletionDesc* device) {
     if (host) ::operator delete(host, std::align_val_t(256));
 }
 
-void backend_flush_descs(CompletionDesc* host, CompletionDesc* device, uint32_t, uint64_t,
-                         uint32_t) {
-    (void)host;
-    (void)device;
-}
+// Producer and poller share one host ring here, so there is nothing to copy.
+bool backend_setup_copy(uint32_t, bool) { return true; }
 
-void backend_flush_wait() {}
+void backend_teardown_copy() {}
 
-void backend_fini_copy() {}
+void backend_flush_descs(uint32_t, CompletionDesc*, CompletionDesc*, uint32_t, uint64_t,
+                         uint32_t) {}
+
+void backend_flush_wait(uint32_t) {}
+
+// No flush, so no copy cost: the SimStats copy fields stay zero.
+void backend_copy_stats(uint32_t, SimStats&) {}
 
 void* backend_alloc_host(size_t bytes) {
     return ::operator new(bytes, std::align_val_t(64), std::nothrow);
@@ -147,16 +161,44 @@ void backend_free_host(void* p) {
 
 int64_t backend_clock_offset_ns() { return 0; }
 
-bool backend_launch_poller(const CompletionRing& ring, RingControl* ctrl, PollStats* stats,
+uint32_t backend_max_queues() { return kMaxQueues; }
+
+bool backend_launch_poller(const PollQueue* queues, uint32_t n_queues,
                            int64_t /*clock_offset_ns*/, const RunConfig& cfg) {
+    if (n_queues == 0 || n_queues > kMaxQueues) {
+        std::fprintf(stderr, "[gnp] cpu-fallback supports 1..%u queues, got %u\n", kMaxQueues,
+                     n_queues);
+        return false;
+    }
+
+    // Each queue costs two spinning threads: its poller and its producer.
+    const unsigned hw = std::thread::hardware_concurrency();
+    if (cfg.verbose && hw && 2u * n_queues > hw) {
+        std::printf("[gnp] warning: %u queues need %u spinning threads but only %u hardware "
+                    "threads exist; latency will reflect OS scheduling, not polling\n",
+                    n_queues, 2u * n_queues, hw);
+    }
+
     const unsigned long long max_run_ns =
         (static_cast<unsigned long long>(cfg.duration_ms) + 5000ull) * 1000000ull;
-    g_poller = std::thread(poll_loop, ring, ctrl, stats, max_run_ns, cfg.idle_backoff_ns);
+    g_pollers.reserve(n_queues);
+    for (uint32_t q = 0; q < n_queues; ++q) {
+        g_pollers.emplace_back(poll_loop, queues[q].ring, queues[q].ctrl, queues[q].stats,
+                               max_run_ns, cfg.idle_backoff_ns);
+#if defined(__linux__)
+        char name[16];
+        std::snprintf(name, sizeof(name), "gnp-poll-%u", q);
+        pthread_setname_np(g_pollers.back().native_handle(), name);
+#endif
+    }
     return true;
 }
 
 bool backend_wait_poller() {
-    if (g_poller.joinable()) g_poller.join();
+    for (std::thread& t : g_pollers) {
+        if (t.joinable()) t.join();
+    }
+    g_pollers.clear();
     return true;
 }
 

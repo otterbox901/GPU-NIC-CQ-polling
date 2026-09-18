@@ -28,13 +28,15 @@ uint64_t host_now_ns();
 
 /// Everything the user can tune from the command line.
 struct RunConfig {
-    uint32_t ring_capacity  = 1024;    ///< completion-queue entries, power of two
+    uint32_t queues         = 1;       ///< independent completion rings, one poller each
+    uint32_t ring_capacity  = 1024;    ///< entries per completion queue, power of two
     uint32_t payload_bytes  = 1024;    ///< simulated packet size
-    uint64_t target_pps     = 100000;  ///< simulator injection rate (packets/sec)
-    uint64_t max_packets    = 0;       ///< 0 = run until the duration expires
+    uint64_t target_pps     = 100000;  ///< injection rate per queue (packets/sec)
+    uint64_t max_packets    = 0;       ///< per queue; 0 = run until the duration expires
     uint32_t duration_ms    = 2000;    ///< how long to keep the poller alive
     uint32_t burst          = 1;       ///< descriptors published back-to-back
     uint32_t idle_backoff_ns = 0;      ///< 0 = pure spin; >0 relaxes the poll loop
+    bool     copy_timing    = false;   ///< time sampled H2D flushes (CUDA; perturbs heavy load)
     bool     verbose        = false;
 };
 
