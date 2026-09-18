@@ -269,7 +269,7 @@ def main():
             (OUT / f"{name}{suffix}.svg").write_text(svg + "\n")
     print(f"wrote {len(charts) * len(THEMES)} SVGs to {OUT}\n")
 
-    # Tables for the README (the charts' table-view twins).
+    # Tables for the README (the charts' table-view twins)
     print("| queues | host cores polling (GPU / CPU) | mean latency µs (GPU / CPU) "
           "| unpaced Mpps (GPU / CPU) |")
     print("|---|---|---|---|")
