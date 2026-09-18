@@ -187,6 +187,31 @@ scripts/bench.py        # ~5 min; writes docs/bench/results.csv
 scripts/plot_bench.py   # redraws docs/img/*.svg and prints the tables above
 ```
 
+### What Nsight Systems shows
+
+An Nsight Systems trace of one queue at 100 kpps for 1 s
+(`profiles/gnp_q1.nsys-rep`, GTX 1650) confirms the design from the outside:
+
+- **The host does no polling.** The main thread spends the whole run in a
+  single 1 s `nanosleep`. `gnp_poll_kernel` is one launch that runs for the
+  full second. The only busy host thread is the simulated NIC, `gnp-prod-0`.
+- **Pacing is exact.** 100,006 H2D copies of 32 B each, at 100,004 per second.
+  The median gap between copies is 9.95 µs against a 10 µs target.
+- **Each flush costs about 3.3 µs.** That is about 2 µs in the host
+  `cudaMemcpyAsync` call and 1.3 µs of DMA at the median. The copy engine is
+  busy 15% of the run.
+- **The latency spikes come from the host scheduler, not the GPU.** The worst
+  gaps between copies (1.45 ms, 413 µs and 126 µs) line up with `gnp-prod-0`
+  being scheduled off its core. That cost belongs to the simulator, and a real
+  NIC wouldn't pay it.
+
+<!-- TODO: annotated Nsight Systems timeline of the threads.
+<img src="docs/img/nsys-threads.png" width="720" alt="Nsight Systems timeline of one queue at 100 kpps: the main thread sleeps for the whole run, gnp_poll_kernel runs as one launch, and gnp-prod-0 issues a steady stream of H2D copies.">
+-->
+
+Open the trace with `nsys-ui profiles/gnp_q1.nsys-rep`, or summarise it with
+`nsys stats profiles/gnp_q1.nsys-rep`.
+
 ## Build
 
 ```bash
