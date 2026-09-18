@@ -205,7 +205,6 @@ An Nsight Systems trace of one queue at 100 kpps for 1 s
   being scheduled off its core. That cost belongs to the simulator, and a real
   NIC wouldn't pay it.
 
-<!-- TODO: annotated Nsight Systems timeline of the threads.
 <img src="docs/img/nsys-threads.png" width="720" alt="Nsight Systems timeline of one queue at 100 kpps: the main thread sleeps for the whole run, gnp_poll_kernel runs as one launch, and gnp-prod-0 issues a steady stream of H2D copies.">
 -->
 
