@@ -187,7 +187,7 @@ scripts/bench.py        # ~5 min; writes docs/bench/results.csv
 scripts/plot_bench.py   # redraws docs/img/*.svg and prints the tables above
 ```
 
-### What Nsight Systems shows
+### What Nsight (NVIDIA) Systems shows
 
 An Nsight Systems trace of one queue at 100 kpps for 1 s
 (`profiles/gnp_q1.nsys-rep`, GTX 1650) confirms the design from the outside:
