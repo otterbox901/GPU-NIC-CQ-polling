@@ -1,4 +1,4 @@
-# GPU-NIC-Poll
+# GPU NIC-CQ polling
 
 Moving steady-state receive-side completion-queue polling off the CPU and onto
 GPU SMs.
