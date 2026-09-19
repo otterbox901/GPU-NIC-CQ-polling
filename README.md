@@ -1,333 +1,146 @@
-# GPU-NIC-Poll
+# GPU NIC-CQ Polling (GNP)
 
-Moving steady-state receive-side completion-queue polling off the CPU and onto
-GPU SMs.
+Kernel-bypass UDP receive with completion-queue polling moved off the CPU and
+onto GPU SMs.
 
-A `CompletionRing` lives in GPU memory. A persistent CUDA kernel polls it from an
-SM and counts arrivals. The host allocates, launches, sleeps, and reports — it
-does no per-packet work at all.
+Packets arrive through **AF_XDP**. An eBPF/XDP program on the NIC redirects one
+UDP port into a userspace socket before the kernel network stack ever sees the
+frame. An RX thread copies each UDP payload into a payload arena and publishes
+a 32-byte `CompletionDesc` into a `CompletionRing` that lives in GPU memory. A
+persistent CUDA kernel polls that ring from an SM and hands every packet to
+`gnp::on_packet()`, the function where real processing goes (it is an empty
+placeholder today). The main thread allocates, launches, sleeps and reports.
 
-With `--queues N` there are N independent rings, each polled by its own
-single-thread block of one `<<<N, 1>>>` launch — the GPU-side equivalent of a
-multi-queue NIC. Queues share nothing, so throughput scales with `N` while
-per-queue latency stays flat.
-
-Real NIC hardware is not wired up yet, so a host thread stands in for it. See
-[`docs/design.md`](docs/design.md) for the protocol and the reasoning.
+| document | contents |
+|---|---|
+| **this file** | what it is, how to build it, how to run it on a NIC |
+| [`testing/README.md`](testing/README.md) | unit tests, the simulated NIC, pcap replay, benchmarks |
+| [`docs/README.md`](docs/README.md) | measured results, latency analysis, and an index of the design docs |
+| [`docs/design.md`](docs/design.md) | the protocol and the reasoning behind every design choice |
 
 ```mermaid
 flowchart LR
+    subgraph NIC["NIC"]
+        XDP["XDP program<br/>udp_redirect.bpf.c<br/>UDP dport == --port ?"]
+    end
     subgraph HOST["Host CPU"]
-        MAIN["main thread<br/>allocate, launch, sleep, report"]
-        PROD["simulated NIC<br/>(one thread per queue)"]
+        UMEM[("AF_XDP UMEM<br/>(raw frames)")]
+        RX["RX thread (xdp_ingest.cpp)<br/>parse, copy payload,<br/>ring_publish()"]
+        ARENA[("payload arena")]
         STAGE[("pinned staging ring")]
-        PROD -- "write CQE,<br/>owner bit last" --> STAGE
+        MAIN["main thread<br/>allocate, launch, sleep, report"]
+        UMEM --> RX
+        RX -- "UDP payload" --> ARENA
+        RX -- "CompletionDesc,<br/>owner bit last" --> STAGE
     end
     subgraph GPU["GPU"]
         CQ[("device completion ring<br/>(GDDR)")]
-        POLL["persistent poller<br/>(one 1-thread block per queue)"]
+        POLL["persistent poller<br/>on_packet(desc, payload)"]
         CQ -- "spin: one load +<br/>owner-bit compare" --> POLL
     end
-    STAGE -- "DMA copy engine<br/>(one copy stream per queue)" --> CQ
-    POLL -. "consumed watermark<br/>(back-pressure)" .-> PROD
+    XDP -- "XDP_REDIRECT<br/>(bypasses the network stack)" --> UMEM
+    XDP -. "any other traffic:<br/>XDP_PASS" .-> STACK["kernel network stack"]
+    STAGE -- "DMA copy engine" --> CQ
+    POLL -. "consumed watermark<br/>(back-pressure)" .-> RX
     MAIN -. "launch once,<br/>stop at the end" .-> POLL
 ```
 
-Each queue gets its own copy of everything except the main thread. With a real
-NIC, the NIC DMAs straight into the device ring, so the simulated producer, the
-staging ring and the copy step all go away. The poller stays the same.
+## How a packet gets through
 
-## GPU polling vs CPU polling
-
-Both backends run the **same poll loop over the same owner-bit ring**. They
-differ only in where the loop runs and which memory it reads:
-
-| | GPU poller ([`poll_kernel.cu`](src/gpu/poll_kernel.cu)) | CPU fallback ([`poll_cpu.cpp`](src/gpu/poll_cpu.cpp)) |
-|---|---|---|
-| poll loop runs on | an SM: one single-thread block per queue | a host core: one spinning thread per queue |
-| ring it reads | device memory, filled by DMA over PCIe | host memory, written directly by the producer |
-| **host cores spent polling** (5 queues) | **0.00** | **4.96** |
-| mean detection latency (5 queues × 50 kpps) | 6.0 µs | 1.16 µs |
-| … of which H2D flush (simulator only) | 5.7 µs | none |
-| poll loop period (1 queue) | 1.3 µs | 0.002 µs |
-| unpaced throughput (5 queues) | 14.3 Mpps | 75.8 Mpps |
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/host-cpu-dark.svg">
-  <img src="docs/img/host-cpu.svg" width="720" alt="Host CPU spent on polling, 1 to 5 queues: the GPU poller uses 0 cores at every queue count; the CPU fallback uses 0.99, 1.99, 2.98, 3.96 and 4.96 cores.">
-</picture>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/latency-dark.svg">
-  <img src="docs/img/latency.svg" width="720" alt="Mean detection latency at 50 kpps per queue, 1 to 5 queues: GPU poller 5.7, 6.4, 6.1, 5.9, 6.0 microseconds; CPU fallback 0.10, 0.12, 0.15, 0.55, 1.16 microseconds.">
-</picture>
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/throughput-dark.svg">
-  <img src="docs/img/throughput.svg" width="720" alt="Unpaced throughput with 64-entry rings, 1 to 5 queues: GPU poller 3.0, 6.0, 8.9, 11.6, 14.3 Mpps; CPU fallback 22.5, 41.1, 59.0, 65.9, 75.8 Mpps. Both scale roughly linearly.">
-</picture>
-
-**How to read these charts:**
-
-- **Host CPU is the result that matters, and the simulator doesn't affect it.**
-  A spinning poll thread burns a full core whether packets arrive or not; the
-  CPU fallback costs exactly one core per queue. The GPU poller costs **no host
-  CPU at all**. Its price is an SM block slot per queue instead (see
-  [Multi-queue](#multi-queue)).
-- **Latency and throughput favour the CPU fallback in this prototype, and
-  almost all of the latency gap is the simulator.** The CPU fallback's
-  simulated NIC writes straight into memory the poll thread reads, so no packet
-  ever crosses PCIe. The GPU path pays a real DMA hop per batch (host staging →
-  device ring), and that hop is nearly all of its latency. See
-  [Where the GPU latency goes](#where-the-gpu-latency-goes). With real hardware
-  both paths receive over PCIe: NIC → host RAM for a CPU poller, NIC → GPU
-  memory (GPUDirect) for the GPU poller.
-- **The GPU latency is steady.** It stays at about 6 µs from 1 to 5 queues,
-  and both backends' throughput scales roughly linearly with the queue count.
-
-Setup: GTX 1650 (sm_75, 16 SMs) and an i7-9750H (12 hardware threads). Each
-point is the median of 5 runs. Every run delivered every packet with zero gaps.
-The raw data is in [`docs/bench/results.csv`](docs/bench/results.csv).
-
-<details>
-<summary>Data table</summary>
-
-| queues | host cores polling (GPU / CPU) | mean latency µs (GPU / CPU) | unpaced Mpps (GPU / CPU) |
-|---|---|---|---|
-| 1 | 0.00 / 0.99 | 5.7 / 0.10 | 3.0 / 22.5 |
-| 2 | 0.00 / 1.99 | 6.4 / 0.12 | 6.0 / 41.1 |
-| 3 | 0.00 / 2.98 | 6.1 / 0.15 | 8.9 / 59.0 |
-| 4 | 0.00 / 3.96 | 5.9 / 0.55 | 11.6 / 65.9 |
-| 5 | 0.00 / 4.96 | 6.0 / 1.16 | 14.3 / 75.8 |
-
-Host CPU is measured per thread from `/proc`, excluding the simulated
-producers, which cost one core per queue on both backends. Latency and host
-CPU come from runs at 50 kpps per queue for 2 s. Throughput comes from
-unpaced runs on 64-entry rings for 1 s.
-</details>
-
-### Where the GPU latency goes
-
-The GPU poller's 6 µs against the CPU fallback's 0.1–1 µs looked like a verdict
-on GPU polling. It isn't one. The detection latency (producer publishes a CQE →
-poller observes it) has two parts on the GPU path, and only one belongs to the
-poller:
-
-1. **H2D flush.** The simulated NIC writes CQEs into pinned host staging, and
-   `backend_flush_descs` DMAs them into the device ring. This happens for
-   **every batch, all run long**. A real NIC writes into GPU memory directly,
-   so this step exists only in the simulator.
-2. **Poll reaction.** Once the data lands in the device ring, the poller has to
-   notice it. This is the part that measures GPU polling.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/latency-split-dark.svg">
-  <img src="docs/img/latency-split.svg" width="720" alt="Mean GPU detection latency beside the sampled H2D flush time at 50 kpps per queue, 1 to 5 queues: GPU mean 5.46, 5.58, 5.73, 6.02, 6.04 microseconds; H2D flush 5.14, 5.35, 5.49, 5.61, 5.72 microseconds; CPU fallback mean 0.10, 0.12, 0.15, 0.55, 1.16 microseconds.">
-</picture>
-
-**The flush is 5.1–5.7 µs of a 5.5–6.0 µs mean.** What's left, 0.1–0.4 µs,
-is smaller than the measurement error (see below), so subtraction can't
-resolve it. A direct measurement can: an idle poll iteration takes **1.3 µs**
-(`poll loop period`), so data that lands mid-iteration waits about 0.65 µs on
-average and 1.3 µs at worst. That figure comes from the poller's own counters,
-not from a clock comparison. Take away the simulator's copy, and GPU polling
-reacts within the same order of magnitude as the CPU fallback's 0.1–1 µs.
-
-The 1.3 µs iteration is itself a finding. On the idle path the kernel reads
-`stop_flag`, which lives in host-mapped memory, so every empty poll pays a PCIe
-round trip. Checking it less often should shorten the loop. That change is
-untested.
-
-| queues | GPU mean µs | GPU H2D flush µs | CPU mean µs |
-|---|---|---|---|
-| 1 | 5.46 | 5.14 | 0.10 |
-| 2 | 5.58 | 5.35 | 0.12 |
-| 3 | 5.73 | 5.49 | 0.15 |
-| 4 | 6.02 | 5.61 | 0.55 |
-| 5 | 6.04 | 5.72 | 1.16 |
-
-<details>
-<summary>How we got here: measuring the flush without distorting it</summary>
-
-- **"Pre-load the ring before starting the timer": rejected.** The copy happens
-  per batch for the whole run, not once at setup, so pre-loading only removes
-  the first batch. It also leaves the ring already full when the poll loop
-  starts, so "detection" becomes instant and the latency stops measuring
-  anything.
-- **"Pause the timer during the copy": rejected.** The copy engine and the
-  poll loop run at the same time on different engines. The poll loop never
-  waits on a copy in sequence, so there is nothing to pause around.
-- **Split the metric instead.** Time the flush separately and report it next
-  to the unchanged total. The first version timed the flush with a CUDA event
-  pair and got it wrong: the flush came out longer than the whole latency
-  (10 µs of flush inside a 5 µs total). A standalone test on the same GPU
-  found the cause: recording events around a 32-byte copy more than doubled
-  the time until a spinning kernel saw the data (3.5 → 8 µs). The measurement
-  was slowing down the thing it measured.
-- **What ships:** 1 in 32 flushes is timed with a host clock around
-  `cudaStreamSynchronize`. This leaves the copy alone, but it reads about
-  1.4 µs high, because the host needs time to wake after the copy completes.
-  The mean latency also carries the ~2 µs clock-offset error. So the
-  `outside H2D flush` residual is only good to about ±2 µs, and it can go
-  negative.
-- **Opt-in, because it still perturbs heavy load.** The sampled sync stalls
-  its producer. At 50 kpps that made no difference, but at 2 × 200 kpps it
-  throttled the copy backlog and cut mean latency from ~11 µs to ~7 µs. So
-  timing only runs with `--copy-timing`, and `scripts/bench.py` gets those
-  numbers from a separate `copy` scenario. Every other figure on this page
-  comes from runs without it.
-</details>
-
-Reproduce on your machine:
-
-```bash
-cmake --preset sim     && cmake --build --preset sim       # CUDA backend
-cmake --preset sim-cpu && cmake --build --preset sim-cpu   # CPU fallback
-scripts/bench.py        # ~5 min; writes docs/bench/results.csv
-scripts/plot_bench.py   # redraws docs/img/*.svg and prints the tables above
-```
-
-### What Nsight Systems shows
-
-An Nsight Systems trace of one queue at 100 kpps for 1 s
-(`profiles/gnp_q1.nsys-rep`, GTX 1650) confirms the design from the outside:
-
-- **The host does no polling.** The main thread spends the whole run in a
-  single 1 s `nanosleep`. `gnp_poll_kernel` is one launch that runs for the
-  full second. The only busy host thread is the simulated NIC, `gnp-prod-0`.
-- **Pacing is exact.** 100,006 H2D copies of 32 B each, at 100,004 per second.
-  The median gap between copies is 9.95 µs against a 10 µs target.
-- **Each flush costs about 3.3 µs.** That is about 2 µs in the host
-  `cudaMemcpyAsync` call and 1.3 µs of DMA at the median. The copy engine is
-  busy 15% of the run.
-- **The latency spikes come from the host scheduler, not the GPU.** The worst
-  gaps between copies (1.45 ms, 413 µs and 126 µs) line up with `gnp-prod-0`
-  being scheduled off its core. That cost belongs to the simulator, and a real
-  NIC wouldn't pay it.
-
-<img src="docs/img/nsys-threads.png" width="720" alt="Nsight Systems timeline of one queue at 100 kpps: the main thread sleeps for the whole run, gnp_poll_kernel runs as one launch, and gnp-prod-0 issues a steady stream of H2D copies.">
--->
-
-Open the trace with `nsys-ui profiles/gnp_q1.nsys-rep`, or summarise it with
-`nsys stats profiles/gnp_q1.nsys-rep`.
+1. **Attach.** `gnp` loads `udp_redirect.bpf.o`, writes `--port` and
+   `--nic-queue` into its `config_map`, and attaches it to `--iface`. It uses
+   native (driver) XDP when the NIC supports it and generic (SKB) XDP otherwise.
+2. **Open the socket.** One AF_XDP socket is bound to NIC RX queue
+   `--nic-queue` (default 0) and registered in the program's `xsks_map`. A 16 MiB
+   UMEM (4096 × 4 KiB frames) is handed to the kernel through the fill ring.
+3. **Filter at the driver.** For every incoming frame, the XDP program checks
+   Ethernet → IPv4 → UDP with bounds checks. An unfragmented datagram to the
+   capture port is redirected into the socket. Anything else (other ports, TCP,
+   ARP, IPv6, fragments) gets `XDP_PASS` and reaches the normal stack, so SSH
+   and everything else on the interface keep working.
+4. **Ingest.** The RX thread (`gnp-xdp-rx`) takes up to 64 descriptors from
+   the RX ring at a time. For each frame it re-validates the headers, copies the
+   UDP payload into arena slot `ring_slot(idx) × --size`, and calls
+   `ring_publish()`. That fills `payload_offset`, `byte_len`, `packet_id` and
+   `post_ns`, issues a full fence, and writes the owner bit last. The UMEM frame
+   goes straight back on the fill ring.
+5. **Move to the GPU.** After each batch, the new descriptors are DMA'd from
+   pinned staging into the device ring, owner bit last per slot.
+6. **Poll.** The persistent kernel spins on one load plus an owner-bit compare.
+   When a descriptor is ready it reads the fields, calls
+   `on_packet(desc, payload)`, updates the counters, and publishes its consumed
+   watermark every 64 packets so the RX thread knows which slots are free.
+7. **Stop and report.** After `--duration`, the RX thread is joined, the XDP
+   program is detached, and the socket is closed. The XDP program's and the
+   kernel's counters are printed. The poller drains up to the final published
+   count before it retires, then the summary is printed.
 
 ## Build
 
-```bash
-cmake --preset sim
-cmake --build --preset sim
-ctest --preset sim
-```
+### 1. Install the dependencies
 
-CUDA is **auto-detected**. If `nvcc` is found you get the real persistent kernel
-(`src/gpu/poll_kernel.cu`); if not, CMake warns and builds an equivalent poll
-loop on a host thread (`src/gpu/poll_cpu.cpp`) so the ring, simulator, metrics
-and tests still work. Which one is active is printed at configure time
-(`gnp: simulation=ON cuda=ON/OFF ...`) and in every run summary.
-
-The CUDA backend keeps the completion ring in **device memory** and a pinned
-**host staging** buffer the simulator publishes into. The DMA copy engine
-(`cudaMemcpyAsync`, one copy stream per queue) moves completed CQEs across,
-owner bit last. That way the SM polls local GDDR instead of PCIe-mapped host
-pages — and when a real NIC arrives it can DMA straight into the same device CQ.
-
-## Run
+| dependency | needed for | Fedora | Debian / Ubuntu |
+|---|---|---|---|
+| CMake ≥ 3.24, g++ (C++17), pkg-config | everything | `cmake gcc-c++ pkgconf` | `cmake g++ pkg-config` |
+| libbpf, libxdp, kernel headers | AF_XDP ingest | `libbpf-devel libxdp-devel kernel-headers` | `libbpf-dev libxdp-dev linux-libc-dev` |
+| clang, llvm | compiling the XDP program | `clang llvm` | `clang llvm` |
+| CUDA toolkit | GPU poller (optional) | see [below](#installing-cuda-fedora) | `nvidia-cuda-toolkit` |
 
 ```bash
-./build/sim/gnp --verbose                       # defaults: 1024-entry ring, 100 kpps, 2 s
-./build/sim/gnp --pps 0 --ring 64               # unpaced, exercises back-pressure
-./build/sim/gnp --packets 50000 --burst 16      # fixed count, bursty arrivals
-./build/sim/gnp --queues 4 --pps 100000         # 4 independent queues, 400 kpps total
-./build/sim/gnp --help
+sudo dnf install cmake gcc-c++ pkgconf clang llvm libbpf-devel libxdp-devel kernel-headers
 ```
 
-| flag | meaning | default |
+Without CUDA, the poller runs on a host thread instead of an SM. Without
+libbpf, libxdp or clang, `gnp` still builds, but it has no packet source and
+says so at startup.
+
+### 2. Configure and build
+
+```bash
+cmake --preset prod
+cmake --build --preset prod
+```
+
+The configure log states what was found. Check this line:
+
+```
+-- gnp: AF_XDP ingest enabled (libbpf 1.6.3, libxdp 1.6.3, /usr/bin/clang)
+-- gnp: cuda=ON xdp=ON testing=OFF
+```
+
+- `cuda=ON`: `nvcc` and a host compiler it accepts were found, so the poller is
+  the persistent kernel (`src/gpu/poll_kernel.cu`). With `OFF`, it is
+  `src/gpu/poll_cpu.cpp`.
+- `xdp=ON`: the AF_XDP ingest is compiled in. With `OFF`, the warning above it
+  names what's missing.
+- `testing=OFF`: nothing from `testing/` is compiled or linked.
+
+The output is two files:
+
+```
+build/prod/gnp                 the receiver
+build/prod/udp_redirect.bpf.o  the XDP program, loaded by gnp at startup
+```
+
+Keep them together, or pass `--bpf-obj PATH`.
+
+### 3. Presets
+
+| preset | builds | use it for |
 |---|---|---|
-| `--queues N` | independent completion rings, one poller each | 1 |
-| `--ring N` | entries per ring, power of two | 1024 |
-| `--size B` | simulated packet size | 1024 |
-| `--pps R` | injection rate **per queue**, `0` = unpaced | 100000 |
-| `--packets N` | stop after N packets **per queue**, `0` = use duration | 0 |
-| `--duration MS` | how long to run | 2000 |
-| `--burst N` | descriptors published back-to-back | 1 |
-| `--backoff NS` | relax the poll loop when idle, `0` = pure spin | 0 |
-| `--copy-timing` | time 1 in 32 H2D flushes (CUDA); stalls the producer, so it lowers latency near saturation | off |
-| `--verbose` | device, allocation and clock-offset details | off |
+| `prod` | `gnp` | real traffic |
+| `dev` | `gnp`, `gnp_sim`, `test_ring` | development, benchmarks, CI ([testing/README.md](testing/README.md)) |
+| `dev-cpu` | same as `dev`, CPU poller forced | fast protocol iteration |
+| `debug` | same as `dev`, `-O0 -g` | debugging |
 
-## Reading the output
+The underlying options are `GNP_ENABLE_CUDA` (ON), `GNP_ENABLE_XDP` (ON) and
+`GNP_BUILD_TESTING` (OFF). The first two auto-detect, and turning one OFF
+skips the detection.
 
-The two numbers that matter for correctness are **`packet-id gaps`** and the
-difference between `descriptors published` and `packets observed`. Both must be
-zero. A gap means the poller mis-sequenced the ring; a shortfall means it
-stopped before draining.
-
-`idle spins per packet` is the interesting performance number — it is how many
-times the SM read a descriptor and found nothing, per useful packet. At low
-rates it is large by construction, which is exactly the cost this design accepts
-in exchange for leaving the CPU alone.
-
-`poll loop period` (single-queue runs) is poller active time divided by loop
-iterations. A CQE that lands mid-iteration waits for the next status load,
-about half a period on average, so this is the poller's reaction time without
-any cross-clock comparison.
-
-With `--copy-timing`, the CUDA backend adds `H2D flush, submit->done` (the
-simulator's host → device copy) and `outside H2D flush` (mean latency minus
-that). See [Where the GPU latency goes](#where-the-gpu-latency-goes) for how
-to read them and why they're opt-in.
-
-With more than one queue, the top sections show the **aggregate** under the
-same labels (counters summed, latency pooled across queues), so the checks
-above apply unchanged. A per-queue table follows:
-
-```
-  per-queue breakdown
-  queue   published    observed   gaps   stalls   idle/pkt    us/pkt lat avg us lat max us
-  --------------------------------------------------
-  0           99973       99973      0        0      7.136    10.006      8.314    162.746
-  1          100004      100004      0        0      7.136    10.003      7.291    147.929
-```
-
-Check it: a pooled mean can hide a single slow queue.
-
-## Multi-queue
-
-Each queue gets its own ring, control block, stats, payload arena, producer
-thread, copy stream and poller, and nothing is shared between queues.
-
-- **Limit.** Pollers are persistent, so they must all be resident at the same
-  time. A poller that is not resident never starts, and the run hangs. The limit
-  is max-resident-blocks-per-SM × SM count (256 on a 16-SM GTX 1650). A higher
-  `--queues` is refused before anything is allocated. `--verbose` prints the
-  limit.
-- **Fair comparisons.** `--pps` is per queue, so `--queues 4 --pps 100000` is
-  400 kpps in total. To see what parallelism buys, compare it with
-  `--queues 1 --pps 400000`, not with `--queues 1 --pps 100000`.
-- **Simulator limits.** Each simulated producer busy-spins on a host thread.
-  Past one per hardware thread, results measure host scheduling (the program
-  warns). Paced runs issue one H2D copy per packet, which caps near 0.45 Mpps in
-  total on that machine. Real NIC queues have neither limit.
-
-Unpaced throughput scales roughly linearly with queues (see the throughput
-chart above). Holding total load at 400 kpps and splitting it over more queues
-cuts mean latency:
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/multiqueue-latency-dark.svg">
-  <img src="docs/img/multiqueue-latency.svg" width="720" alt="GPU poller at 400 kpps total: mean detection latency 18.9 microseconds with 1 queue, 11.4 with 2, 7.2 with 4 and 6.6 with 8.">
-</picture>
-
-Single-queue runs are the noisiest (14.6–29.1 µs over 5 runs). At 400 kpps,
-one producer thread feeding one copy stream is the bottleneck, and 4 or 8
-queues spread that work out.
-
-See [`docs/design.md`](docs/design.md#multi-queue) for the reasoning and the
-alternatives that were rejected.
-
-## Installing CUDA (Fedora)
+### Installing CUDA (Fedora)
 
 Only the NVIDIA driver is required at runtime, but `nvcc` is needed to build the
-real kernel:
+kernel:
 
 ```bash
 sudo dnf install cuda-toolkit
@@ -349,37 +162,145 @@ Two things commonly bite on a current Fedora:
   cached, so you never need to delete a build directory after fixing the toolchain.
 - **Display-GPU watchdog.** If the GPU also drives your desktop, a persistent
   kernel will freeze the display for as long as it runs and may be killed by the
-  X/Wayland watchdog after a few seconds. Keep `--duration` short (the 2 s
-  default is deliberate), or run on a GPU that is not driving a display.
+  X/Wayland watchdog after a few seconds. Keep `--duration` short, or run on a
+  GPU that is not driving a display.
+
+## Run on a NIC
+
+### Pick the hardware
+
+The NIC's driver decides whether this is real kernel bypass:
+
+- **Native XDP** runs in the driver before any skb is allocated. Supported by
+  Intel `ice`, `i40e`, `ixgbe`, `igb`, `igc`, Mellanox `mlx5`, `virtio_net` and
+  others. `ice`, `i40e` and `mlx5` also support zero-copy AF_XDP.
+- **Generic XDP** works on any interface (Wi-Fi, USB Ethernet, veth), but runs
+  after skb allocation. It is correct but not a bypass.
+
+Check the driver with `ethtool -i <iface>`. The GPU should be in the same
+machine as the NIC.
+
+### Prepare the interface
+
+```bash
+# multi-queue NICs spread flows over RX queues; put the capture port on queue 0
+sudo ethtool -N enp1s0 flow-type udp4 dst-port 9000 action 0
+# or collapse to a single queue
+sudo ethtool -L enp1s0 combined 1
+```
+
+AF_XDP only sees packets on the queue its socket is bound to. Matching packets
+that arrive on another queue are passed to the kernel, not dropped, but `gnp`
+won't see them. The exit report says when this happens.
+
+### Start the receiver
+
+```bash
+sudo ./build/prod/gnp --iface enp1s0 --port 9000 --duration 30000
+```
+
+| flag | meaning | default |
+|---|---|---|
+| `--iface NAME` | interface to attach the XDP program to | required |
+| `--port N` | destination UDP port to capture | required |
+| `--nic-queue N` | NIC RX queue the AF_XDP socket binds to | 0 |
+| `--skb-mode` | force generic XDP | native, falling back to generic |
+| `--bpf-obj PATH` | XDP program object | `udp_redirect.bpf.o` next to `gnp` |
+| `--ring N` | entries in the completion ring, power of two | 1024 |
+| `--size B` | arena bytes per slot = largest UDP payload kept | 1024 |
+| `--duration MS` | how long to capture | 2000 |
+| `--backoff NS` | relax the poll loop when idle, `0` = pure spin | 0 |
+| `--copy-timing` | time 1 in 32 H2D flushes (CUDA) | off |
+| `--verbose` | device, allocation and clock-offset details | off |
+
+- **Privileges.** Loading XDP and opening AF_XDP sockets needs root. Instead of
+  `sudo` you can grant capabilities once:
+  `sudo setcap cap_net_admin,cap_net_raw,cap_bpf,cap_perfmon,cap_ipc_lock+ep build/prod/gnp`.
+  `CAP_IPC_LOCK` is needed because the UMEM is locked memory.
+- **Native first.** Without `--skb-mode`, `gnp` tries native XDP and prints
+  `falling back to generic (SKB) mode` if the driver can't do it.
+- **One XDP program per interface.** `gnp` refuses to replace an existing one.
+  Check with `ip link show enp1s0` (look for `prog/xdp`). If a killed run left
+  the program attached, remove it with `sudo ip link set enp1s0 xdp off` (or
+  `xdpgeneric off`).
+- **v1 scope.** One UDP port, one RX queue, IPv4, `--queues 1`.
+
+Send traffic from another machine while it runs. To replay a capture with
+tcpreplay, see
+[testing/README.md](testing/README.md#4-real-nic-tcpreplay-from-a-second-machine).
+
+### Read the result
+
+`gnp` prints two diagnostic lines before the summary:
+
+```
+[gnp] AF_XDP kernel counters: rx_dropped=0 rx_invalid=0 rx_ring_full=0 fill_ring_empty=0
+[gnp] XDP program: 10000 frames to UDP port 9000, 10000 of them on RX queue 0
+```
+
+| symptom | meaning |
+|---|---|
+| `XDP program: 0 frames` | no traffic reached the interface while `gnp` was attached (wrong port, wrong IP/MAC, or sent outside the window) |
+| frames on queue 0 < frames total | RSS put some on other queues; steer the port (above) |
+| `rx_ring_full` or `fill_ring_empty` > 0 | the RX thread fell behind and the kernel dropped frames |
+| `frames dropped` > 0 in the summary | a payload was larger than `--size`, or a frame was malformed |
+| `ring-full stalls` > 0 | the poller fell behind and the RX thread waited for free slots |
+
+A clean run has `descriptors published` == `packets observed` == frames on the
+bound queue, `packet-id gaps` == 0, and every counter above at zero. The other
+summary fields are explained in
+[docs/README.md](docs/README.md#reading-the-run-summary).
+
+## Where packet processing goes
+
+[`include/gnp/packet_handler.hpp`](include/gnp/packet_handler.hpp):
+
+```cpp
+GNP_HD GNP_FORCEINLINE void on_packet(const CompletionDesc& desc, const uint8_t* payload) {
+    (void)desc;
+    (void)payload;
+}
+```
+
+Both pollers call it once per packet, in ring order, right after the descriptor
+is observed. `desc` carries `byte_len`, `packet_id`, `post_ns` and
+`payload_offset`. `payload` points at the UDP payload on the CPU poller. It is
+`nullptr` on the CUDA poller, because the payload arena is host memory the
+kernel can't read. A GPU-resident arena is a listed next step in
+[`docs/design.md`](docs/design.md#next-steps-roughly-in-order).
+
+It runs on the poll loop's critical path, so whatever you put there sets the
+per-packet budget. Slow work should be handed off (for example, to the rest
+of the warp on the GPU) rather than done inline.
 
 ## Layout
 
 ```
 include/gnp/
-  common.hpp      RunConfig, clocks, GNP_HD, GNP_CUDA_CHECK
-  ring.hpp        CompletionDesc / CompletionRing / RingControl, owner-bit math,
-                  producer API
-  metrics.hpp     PollStats, report()
-  gpu_poll.hpp    backend interface, PollQueue, Session / QueueSession
+  common.hpp          RunConfig, clocks, GNP_HD, GNP_FORCEINLINE, GNP_CUDA_CHECK
+  ring.hpp            CompletionDesc / CompletionRing / RingControl, owner-bit
+                      math, IngestStats, ring_publish()
+  packet_handler.hpp  on_packet(): the per-packet processing hook (empty)
+  xdp_ingest.hpp      AF_XDP ingest lifecycle
+  cli.hpp             flags shared by gnp and gnp_sim
+  metrics.hpp         PollStats, report()
+  gpu_poll.hpp        backend interface, PollQueue, Session / QueueSession
+src/bpf/
+  udp_redirect.bpf.c  XDP program: one UDP port -> AF_XDP socket, rest XDP_PASS
 src/host/
-  main.cpp        argument parsing and orchestration (per queue)
-  setup.cpp       allocation, teardown, queue-limit check, host_now_ns()
-  sim_inject.cpp  the stand-in NIC, one instance per queue — this is what
-                  real hardware replaces
-  metrics.cpp     aggregation and end-of-run summary
+  main.cpp            gnp: attach, poll, capture, report
+  xdp_ingest.cpp      BPF load/attach, UMEM and socket, RX thread
+  ring.cpp            ring_publish(): the owner-bit publish protocol
+  cli.cpp             shared flag parsing
+  setup.cpp           allocation, teardown, queue-limit check, host_now_ns()
+  metrics.cpp         aggregation and end-of-run summary
 src/gpu/
-  poll_kernel.cu  the persistent pollers (<<<queues, 1>>>) and residency limit
-  utils.cu        device probe, shared allocation, copy streams, clock calibration
-  poll_cpu.cpp    CPU fallback (one thread per queue), built only when nvcc is missing
-tests/
-  test_ring.cpp   owner-bit protocol, ring independence and stats aggregation,
-                  on plain host memory, no GPU needed
-scripts/
-  run_sim.sh      correctness sweep, single- and multi-queue
-  bench.py        GPU vs CPU benchmark -> docs/bench/results.csv
-  plot_bench.py   results.csv -> docs/img/*.svg charts (stdlib only)
-docs/
-  design.md       protocol, memory placement, multi-queue reasoning
-  bench/          benchmark data and the machine it came from
-  img/            README charts, light and dark
+  poll_kernel.cu      the persistent pollers (<<<queues, 1>>>) and residency limit
+  utils.cu            device probe, shared allocation, copy streams, clock calibration
+  poll_cpu.cpp        CPU fallback (one thread per queue), built only when nvcc is missing
+cmake/
+  gnp_cuda.cmake      finds a working nvcc + host compiler pair
+  gnp_xdp.cmake       finds libbpf, libxdp and clang
+testing/              simulator, unit tests, scripts; see testing/README.md
+docs/                 results and design; see docs/README.md
 ```

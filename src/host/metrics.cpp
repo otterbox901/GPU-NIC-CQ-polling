@@ -23,7 +23,7 @@ void row_f64(const char* label, double v, const char* unit) {
 /// Per-queue table. Column names deliberately avoid the aggregate row labels
 /// ("descriptors published", "packets observed", "packet-id gaps", "mean") so
 /// scripts that grep the summary only ever match the aggregate.
-void report_per_queue(const PollStats* poll, const SimStats* sim, uint32_t n_queues) {
+void report_per_queue(const PollStats* poll, const IngestStats* sim, uint32_t n_queues) {
     std::printf("\n  per-queue breakdown\n");
     std::printf("  %-5s %11s %11s %6s %8s %10s %9s %10s %10s\n", "queue", "published",
                 "observed", "gaps", "stalls", "idle/pkt", "us/pkt", "lat avg us", "lat max us");
@@ -68,12 +68,13 @@ PollStats stats_aggregate(const PollStats* poll, uint32_t n_queues) {
     return a;
 }
 
-SimStats sim_aggregate(const SimStats* sim, uint32_t n_queues) {
-    SimStats a;
+IngestStats ingest_aggregate(const IngestStats* sim, uint32_t n_queues) {
+    IngestStats a;
     for (uint32_t q = 0; q < n_queues; ++q) {
-        const SimStats& s = sim[q];
+        const IngestStats& s = sim[q];
         a.produced += s.produced;
         a.overruns += s.overruns;
+        a.dropped += s.dropped;
         a.copy_ns_sum += s.copy_ns_sum;
         a.copy_samples += s.copy_samples;
         if (s.end_ns <= s.start_ns) continue;  // producer never ran
@@ -83,34 +84,35 @@ SimStats sim_aggregate(const SimStats* sim, uint32_t n_queues) {
     return a;
 }
 
-void report(const RunConfig& cfg, const PollStats* per_queue_poll, const SimStats* per_queue_sim,
-            uint32_t n_queues, const char* backend, int64_t clock_offset_ns) {
+void report(const RunConfig& cfg, const PollStats* per_queue_poll, const IngestStats* per_queue_sim,
+            uint32_t n_queues, const char* backend, const char* ingest_label,
+            int64_t clock_offset_ns) {
     const PollStats poll = stats_aggregate(per_queue_poll, n_queues);
-    const SimStats sim = sim_aggregate(per_queue_sim, n_queues);
+    const IngestStats sim = ingest_aggregate(per_queue_sim, n_queues);
     const bool multi = n_queues > 1;
 
     const double elapsed_s =
         sim.end_ns > sim.start_ns ? (sim.end_ns - sim.start_ns) / 1e9 : 0.0;
 
     std::printf("\n=== gpu-nic-poll run summary ===\n");
-    if (multi) {
-        std::printf("  backend: %s   queues: %u   ring: %u   payload: %u B   target: %llu pps/queue\n\n",
-                    backend, n_queues, cfg.ring_capacity, cfg.payload_bytes,
-                    static_cast<unsigned long long>(cfg.target_pps));
-    } else {
-        std::printf("  backend: %s   ring: %u   payload: %u B   target: %llu pps\n\n", backend,
-                    cfg.ring_capacity, cfg.payload_bytes,
-                    static_cast<unsigned long long>(cfg.target_pps));
+    std::printf("  backend: %s   ", backend);
+    if (multi) std::printf("queues: %u   ", n_queues);
+    std::printf("ring: %u   payload slot: %u B", cfg.ring_capacity, cfg.payload_bytes);
+    if (cfg.target_pps) {
+        std::printf("   target: %llu pps%s", static_cast<unsigned long long>(cfg.target_pps),
+                    multi ? "/queue" : "");
     }
+    std::printf("\n\n");
 
     if (multi) {
-        std::printf("  producers (simulated NIC, %u queues combined)\n", n_queues);
+        std::printf("  producers (%s, %u queues combined)\n", ingest_label, n_queues);
     } else {
-        std::printf("  producer (simulated NIC)\n");
+        std::printf("  producer (%s)\n", ingest_label);
     }
     rule();
     row_u64("descriptors published", sim.produced);
     row_u64("ring-full stalls", sim.overruns);
+    if (sim.dropped) row_u64("frames dropped", sim.dropped, "(malformed, or payload > --size)");
     row_f64("elapsed", elapsed_s, "s");
     if (elapsed_s > 0.0) {
         row_f64("achieved rate", sim.produced / elapsed_s / 1e6, "Mpps");

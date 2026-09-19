@@ -14,7 +14,7 @@ threads) is "other". The GPU poller runs on the GPU, so on that backend the
 polling cost shows up as poll + other = ~0.
 
 Usage:
-  scripts/bench.py [--gpu build/sim/gnp] [--cpu build/sim-cpu/gnp] [--runs 5]
+  testing/scripts/bench.py [--gpu build/dev/testing/gnp_sim] [--cpu build/dev-cpu/testing/gnp_sim] [--runs 5]
 Then render the charts with scripts/plot_bench.py.
 """
 
@@ -29,7 +29,7 @@ import time
 from datetime import date
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 CLK_TCK = os.sysconf("SC_CLK_TCK")
 
 FIELDS = [
@@ -143,8 +143,8 @@ def machine_info(gpu_bin):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--gpu", default=str(ROOT / "build/sim/gnp"))
-    ap.add_argument("--cpu", default=str(ROOT / "build/sim-cpu/gnp"))
+    ap.add_argument("--gpu", default=str(ROOT / "build/dev/testing/gnp_sim"))
+    ap.add_argument("--cpu", default=str(ROOT / "build/dev-cpu/testing/gnp_sim"))
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--out", default=str(ROOT / "docs/bench"))
     args = ap.parse_args()

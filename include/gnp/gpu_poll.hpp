@@ -60,15 +60,15 @@ void backend_flush_descs(uint32_t queue, CompletionDesc* host, CompletionDesc* d
                          uint32_t capacity, uint64_t start_idx, uint32_t count);
 
 /// Wait for queue `queue`'s outstanding flushes. Each producer calls this
-/// before it exits, so once sim_stop() returns that queue's CQEs are on device.
+/// before it exits, so once the producer is joined that queue's CQEs are on device.
 void backend_flush_wait(uint32_t queue);
 
 /// Fill `out`'s copy_* fields with queue `queue`'s sampled flush timings. Call
 /// from that queue's producer after its last flush. Leaves them zero when
 /// timing is off, and on the CPU backend, which has no copy.
-void backend_copy_stats(uint32_t queue, SimStats& out);
+void backend_copy_stats(uint32_t queue, IngestStats& out);
 
-/// Host-only allocation (payload arena). The poller never touches packet bytes.
+/// Host-only allocation (payload arena). Only the CPU poller can read it.
 void* backend_alloc_host(size_t bytes);
 void  backend_free_host(void* p);
 
@@ -89,8 +89,10 @@ uint32_t backend_max_queues();
 
 /// Launch one persistent poller per queue. CUDA: a single <<<n_queues, 1>>>
 /// grid, block b polls queues[b]. CPU: one thread per queue.
-bool backend_launch_poller(const PollQueue* queues, uint32_t n_queues, int64_t clock_offset_ns,
-                           const RunConfig& cfg);
+/// `arenas[q]` is queue q's payload arena, handed to on_packet() by the CPU
+/// poller. Kept out of PollQueue because it is host memory the kernel ignores.
+bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* arenas,
+                           uint32_t n_queues, int64_t clock_offset_ns, const RunConfig& cfg);
 
 /// Wait for every poller to retire.
 bool backend_wait_poller();

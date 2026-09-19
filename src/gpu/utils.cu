@@ -196,7 +196,7 @@ void backend_flush_descs(uint32_t queue, CompletionDesc* host, CompletionDesc* d
     }
 }
 
-void backend_copy_stats(uint32_t queue, SimStats& out) {
+void backend_copy_stats(uint32_t queue, IngestStats& out) {
     if (queue >= g_copy_timing.size()) return;
     const CopyTiming& t = g_copy_timing[queue];
     out.copy_ns_sum = t.ns_sum;

@@ -1,5 +1,5 @@
 //
-// tests/test_ring.cpp - the owner-bit protocol, ring independence (the basis of
+// testing/unit/test_ring.cpp - the owner-bit protocol, ring independence (the basis of
 // multi-queue) and the report's cross-queue aggregation, on plain host memory.
 //
 // No GPU and no CUDA toolkit needed: the index math in ring.hpp is the same
@@ -89,7 +89,7 @@ void test_publish_consume_wraps() {
         CHECK(!gnp::desc_ready(r.descs[gnp::ring_slot(r, produced)].status,
                                gnp::ring_expected_owner(r, produced)));
 
-        gnp::sim_publish(r, produced, produced * 64, 512, static_cast<uint32_t>(produced),
+        gnp::ring_publish(r, produced, produced * 64, 512, static_cast<uint32_t>(produced),
                          gnp::host_now_ns());
 
         // Consumer catches up one entry at a time, exactly like the kernel.
@@ -114,7 +114,7 @@ void test_full_ring_then_drain() {
     for (uint64_t pass = 0; pass < 3; ++pass) {
         const uint64_t base = pass * kCap;
         for (uint32_t i = 0; i < kCap; ++i) {
-            gnp::sim_publish(r, base + i, i * 128, 64, static_cast<uint32_t>(base + i),
+            gnp::ring_publish(r, base + i, i * 128, 64, static_cast<uint32_t>(base + i),
                              gnp::host_now_ns());
         }
         for (uint32_t i = 0; i < kCap; ++i) {
@@ -145,11 +145,11 @@ void test_independent_rings() {
     for (int step = 0; step < 100; ++step) {
         // Ring A gets one entry per step, ring B three: they wrap at different
         // times, so their owner phases drift apart.
-        gnp::sim_publish(a, produced_a, produced_a * 64, 100, static_cast<uint32_t>(produced_a),
+        gnp::ring_publish(a, produced_a, produced_a * 64, 100, static_cast<uint32_t>(produced_a),
                          gnp::host_now_ns());
         ++produced_a;
         for (int k = 0; k < 3; ++k) {
-            gnp::sim_publish(b, produced_b, produced_b * 64, 200,
+            gnp::ring_publish(b, produced_b, produced_b * 64, 200,
                              static_cast<uint32_t>(1000000 + produced_b), gnp::host_now_ns());
             ++produced_b;
         }
@@ -211,11 +211,11 @@ void test_stats_aggregate() {
     const gnp::PollStats one = gnp::stats_aggregate(q, 1);
     CHECK(std::memcmp(&one, &q[0], sizeof(gnp::PollStats)) == 0);
 
-    gnp::SimStats s[3];
+    gnp::IngestStats s[3];
     s[0].produced = 10; s[0].overruns = 1; s[0].start_ns = 100; s[0].end_ns = 900;
     s[1].produced = 30; s[1].overruns = 0; s[1].start_ns = 50;  s[1].end_ns = 800;
     // s[2]: producer never ran (zero window) - must not widen the window.
-    const gnp::SimStats sa = gnp::sim_aggregate(s, 3);
+    const gnp::IngestStats sa = gnp::ingest_aggregate(s, 3);
     CHECK(sa.produced == 40);
     CHECK(sa.overruns == 1);
     CHECK(sa.start_ns == 50);

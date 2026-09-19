@@ -1,11 +1,11 @@
 #pragma once
 //
-// gnp/ring.hpp - the completion ring, and the producers that fill it.
+// gnp/ring.hpp - the completion ring and its publish protocol.
 //
 // The ring is the single point where "how packets arrive" is decoupled from
-// "who notices they arrived". Today the producer is a host thread
-// (sim_inject.cpp); later it will be the NIC writing over PCIe. The consumer
-// is always a CUDA kernel reading from an SM.
+// "who notices they arrived". The producer is the AF_XDP ingest thread
+// (src/host/xdp_ingest.cpp), or the fake NIC in testing/sim/ during
+// development. The consumer is a CUDA kernel on an SM (or the CPU fallback).
 //
 
 #include "gnp/common.hpp"
@@ -54,7 +54,7 @@ struct RingControl {
     unsigned long long publish_limit;
 };
 
-// --- index math, shared verbatim by the kernel, the simulator and the tests ---
+// --- index math, shared verbatim by the pollers and every producer -----------
 
 GNP_HD inline bool is_power_of_two(uint32_t v) { return v != 0 && (v & (v - 1)) == 0; }
 
@@ -73,9 +73,10 @@ GNP_HD inline bool desc_ready(uint32_t status, uint32_t expected_owner) {
 
 // --- producer side -----------------------------------------------------------
 
-struct SimStats {
+struct IngestStats {
     uint64_t produced = 0;   ///< descriptors published
     uint64_t overruns = 0;   ///< times the producer had to wait for a free slot
+    uint64_t dropped  = 0;   ///< frames received but not published (malformed / too big)
     uint64_t start_ns = 0;
     uint64_t end_ns   = 0;
     /// Sampled H2D flushes (CUDA backend only; zero on the CPU fallback).
@@ -83,28 +84,10 @@ struct SimStats {
     uint64_t copy_samples = 0;  ///< flushes that contributed to copy_ns_sum
 };
 
-struct Simulator;  ///< opaque; owns the injection thread
-
 /// Publish one descriptor at `idx` using the owner-bit protocol.
 /// Payload fields are written first, then a store-store barrier, then status.
-/// Exposed (rather than kept static) so tests can drive the protocol directly.
-void sim_publish(const CompletionRing& ring, uint64_t idx, uint64_t payload_offset,
-                 uint32_t byte_len, uint32_t packet_id, uint64_t post_ns);
-
-/// Start the injection thread for queue `queue`. `host_ring.descs` is the
-/// producer staging buffer; `device_descs` is what the poller reads (may alias
-/// host on the CPU backend). Simulators share no state, so one per queue can
-/// run concurrently; each numbers its packets from 0.
-Simulator* sim_start(uint32_t queue, const CompletionRing& host_ring, CompletionDesc* device_descs,
-                     RingControl* ctrl, uint8_t* arena, size_t arena_bytes, const RunConfig& cfg);
-
-/// Ask the injection thread to stop, without waiting. With several queues,
-/// signal them all before joining any, or later queues keep producing while
-/// earlier ones are being joined.
-void sim_request_stop(Simulator* sim);
-
-/// Stop (if not already asked), join the injection thread and collect its
-/// counters. Frees the Simulator.
-void sim_stop(Simulator* sim, SimStats& out);
+/// Every producer goes through this one function (src/host/ring.cpp).
+void ring_publish(const CompletionRing& ring, uint64_t idx, uint64_t payload_offset,
+                  uint32_t byte_len, uint32_t packet_id, uint64_t post_ns);
 
 }  // namespace gnp

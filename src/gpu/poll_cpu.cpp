@@ -18,6 +18,7 @@
 
 #include "gnp/common.hpp"
 #include "gnp/gpu_poll.hpp"
+#include "gnp/packet_handler.hpp"
 
 namespace gnp {
 namespace {
@@ -30,7 +31,7 @@ constexpr uint32_t kMaxQueues = 256;
 
 std::vector<std::thread> g_pollers;
 
-void poll_loop(CompletionRing ring, RingControl* ctrl, PollStats* stats,
+void poll_loop(CompletionRing ring, RingControl* ctrl, PollStats* stats, const uint8_t* arena,
                unsigned long long max_run_ns, unsigned int idle_backoff_ns) {
     auto status_of = [](CompletionDesc* d) {
         return reinterpret_cast<std::atomic<uint32_t>*>(&d->status);
@@ -58,6 +59,8 @@ void poll_loop(CompletionRing ring, RingControl* ctrl, PollStats* stats,
             const uint32_t len = d->byte_len;
             const uint32_t pid = d->packet_id;
             const uint64_t post_ns = d->post_ns;
+
+            on_packet(*d, arena ? arena + d->payload_offset : nullptr);
 
             long long lat = static_cast<long long>(host_now_ns()) - static_cast<long long>(post_ns);
             if (lat < 0) {
@@ -148,8 +151,8 @@ void backend_flush_descs(uint32_t, CompletionDesc*, CompletionDesc*, uint32_t, u
 
 void backend_flush_wait(uint32_t) {}
 
-// No flush, so no copy cost: the SimStats copy fields stay zero.
-void backend_copy_stats(uint32_t, SimStats&) {}
+// No flush, so no copy cost: the IngestStats copy fields stay zero.
+void backend_copy_stats(uint32_t, IngestStats&) {}
 
 void* backend_alloc_host(size_t bytes) {
     return ::operator new(bytes, std::align_val_t(64), std::nothrow);
@@ -163,8 +166,8 @@ int64_t backend_clock_offset_ns() { return 0; }
 
 uint32_t backend_max_queues() { return kMaxQueues; }
 
-bool backend_launch_poller(const PollQueue* queues, uint32_t n_queues,
-                           int64_t /*clock_offset_ns*/, const RunConfig& cfg) {
+bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* arenas,
+                           uint32_t n_queues, int64_t /*clock_offset_ns*/, const RunConfig& cfg) {
     if (n_queues == 0 || n_queues > kMaxQueues) {
         std::fprintf(stderr, "[gnp] cpu-fallback supports 1..%u queues, got %u\n", kMaxQueues,
                      n_queues);
@@ -184,7 +187,7 @@ bool backend_launch_poller(const PollQueue* queues, uint32_t n_queues,
     g_pollers.reserve(n_queues);
     for (uint32_t q = 0; q < n_queues; ++q) {
         g_pollers.emplace_back(poll_loop, queues[q].ring, queues[q].ctrl, queues[q].stats,
-                               max_run_ns, cfg.idle_backoff_ns);
+                               arenas ? arenas[q] : nullptr, max_run_ns, cfg.idle_backoff_ns);
 #if defined(__linux__)
         char name[16];
         std::snprintf(name, sizeof(name), "gnp-poll-%u", q);

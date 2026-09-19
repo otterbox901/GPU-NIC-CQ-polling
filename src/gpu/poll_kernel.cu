@@ -14,6 +14,7 @@
 #include "gnp/common.hpp"
 #include "gnp/gpu_poll.hpp"
 #include "gnp/metrics.hpp"
+#include "gnp/packet_handler.hpp"
 #include "gnp/ring.hpp"
 
 namespace gnp {
@@ -76,6 +77,10 @@ __global__ void gnp_poll_kernel(const PollQueue* queues, unsigned int n_queues,
             const unsigned int len = descs[slot].byte_len;
             const unsigned int pid = descs[slot].packet_id;
             const unsigned long long post_ns = descs[slot].post_ns;
+
+            // The arena is host memory, so the kernel has no payload pointer.
+            const CompletionDesc observed{descs[slot].payload_offset, len, pid, post_ns, 0u, st};
+            on_packet(observed, nullptr);
 
             // Sample latency every 16th packet — %globaltimer every hit was
             // measurable overhead on the critical path.
@@ -149,8 +154,8 @@ uint32_t backend_max_queues() {
     return static_cast<uint32_t>(blocks_per_sm) * static_cast<uint32_t>(sms);
 }
 
-bool backend_launch_poller(const PollQueue* queues, uint32_t n_queues, int64_t clock_offset_ns,
-                           const RunConfig& cfg) {
+bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* /*arenas*/,
+                           uint32_t n_queues, int64_t clock_offset_ns, const RunConfig& cfg) {
     // session_create already enforces this; re-check because a launch past the
     // residency limit does not fail - it hangs forever in backend_wait_poller.
     const uint32_t max_queues = backend_max_queues();

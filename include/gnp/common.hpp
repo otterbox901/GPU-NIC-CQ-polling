@@ -13,8 +13,10 @@
 // translation unit is built by the host compiler (CPU-fallback backend).
 #if defined(__CUDACC__)
 #  define GNP_HD __host__ __device__
+#  define GNP_FORCEINLINE __forceinline__
 #else
 #  define GNP_HD
+#  define GNP_FORCEINLINE inline __attribute__((always_inline))
 #endif
 
 namespace gnp {
@@ -30,8 +32,8 @@ uint64_t host_now_ns();
 struct RunConfig {
     uint32_t queues         = 1;       ///< independent completion rings, one poller each
     uint32_t ring_capacity  = 1024;    ///< entries per completion queue, power of two
-    uint32_t payload_bytes  = 1024;    ///< simulated packet size
-    uint64_t target_pps     = 100000;  ///< injection rate per queue (packets/sec)
+    uint32_t payload_bytes  = 1024;    ///< arena bytes per ring slot; real ingest drops larger UDP payloads
+    uint64_t target_pps     = 100000;  ///< simulator only: injection rate per queue (packets/sec)
     uint64_t max_packets    = 0;       ///< per queue; 0 = run until the duration expires
     uint32_t duration_ms    = 2000;    ///< how long to keep the poller alive
     uint32_t burst          = 1;       ///< descriptors published back-to-back

@@ -10,26 +10,46 @@ If the consumer is a GPU, all of that is wasted motion. The NIC can DMA straight
 into GPU memory (GPUDirect / PeerDirect), and the completion ring can live there
 too — so an SM can do the polling itself and the CPU can stay idle.
 
-This prototype builds the polling half of that, with a software producer standing
-in for the NIC.
+This prototype builds the polling half of that. Packets reach it through AF_XDP
+(kernel bypass into host memory), and a software producer in `testing/` stands
+in for the NIC during development.
 
 ## Structure
 
 ```
 producer                    ring (GPU memory)              consumer
 ─────────────────────       ────────────────────────       ─────────────────
-sim_inject.cpp        ──►   CompletionRing            ◄──  poll_kernel.cu
-(host thread, today)        capacity × 32 B CQE            persistent kernel
+xdp_ingest.cpp        ──►   CompletionRing            ◄──  poll_kernel.cu
+(AF_XDP RX thread)          capacity × 32 B CQE            persistent kernel
                             + RingControl                  1 thread per queue
-NIC via DOCA/GDAKI    ──►   + payload arena           ◄──  (poll_cpu.cpp when
-(later)                                                     nvcc is absent)
+testing/sim/          ──►   + payload arena           ◄──  (poll_cpu.cpp when
+sim_inject.cpp (dev)                                        nvcc is absent)
+                                                            └─ on_packet()
 
         × N queues (--queues N): each row above is replicated per queue,
           and no queue shares memory, a stream or a thread with another.
 ```
 
-The ring is the seam. Swapping the producer for real hardware should not require
-touching the consumer at all.
+The ring is the seam. Swapping the simulator for real AF_XDP ingest did not
+touch the consumer: both producers publish through the same `ring_publish()`
+(`src/host/ring.cpp`), and the pollers cannot tell them apart.
+
+### The AF_XDP producer
+
+`src/bpf/udp_redirect.bpf.c` runs at the NIC driver's XDP hook. It parses
+Ethernet/IPv4/UDP and redirects unfragmented datagrams to one destination port
+into `xsks_map[rx_queue_index]`. Everything else is passed to the kernel stack.
+The map is keyed by RX queue because AF_XDP only accepts frames that arrived on
+the queue its socket is bound to. A matching packet on a queue with no socket
+falls back to `XDP_PASS` instead of being dropped.
+
+`src/host/xdp_ingest.cpp` owns the UMEM (4096 × 4 KiB frames), the fill ring
+and one socket. Its RX thread re-validates each frame, copies the UDP payload
+into the arena slot for the next ring index, publishes the descriptor, and
+recycles the frame onto the fill ring within the same batch. The copy exists
+because UMEM frames must go back to the kernel promptly, while ring slots are
+held until the poller consumes them. Decoupling the two lets a slow consumer
+back up into the ring instead of starving the NIC of frames.
 
 ## Arrival detection: the owner bit
 
@@ -57,7 +77,7 @@ run the *same* index math. A protocol bug cannot hide in one copy.
 ## Publication ordering
 
 The producer must not let the owner bit become visible before the payload
-fields. `sim_publish()` writes `payload_offset`, `byte_len`, `packet_id`,
+fields. `ring_publish()` writes `payload_offset`, `byte_len`, `packet_id`,
 `post_ns`, then a barrier, then `status`.
 
 The barrier is `memory_order_seq_cst`, not `release`, and that is deliberate. On
@@ -73,7 +93,8 @@ payload loads from floating above it.
 
 The CUDA backend keeps **two** copies of the completion ring:
 
-1. **Host staging** (`cudaHostAlloc` mapped) — the simulated NIC publishes here.
+1. **Host staging** (`cudaHostAlloc` mapped) — the producer (AF_XDP RX thread or
+   simulator) publishes here.
 2. **Device CQ** (`cudaMalloc`) — the persistent poller reads here, so status
    loads hit GDDR instead of bouncing over PCIe every spin.
 
@@ -345,19 +366,28 @@ every N idle spins should cut the reaction time. That change is untested.
 ## Non-goals for v1
 
 No DPDK, no kernel module, no userspace network stack, no RSS hashing (queues
-are fed by independent producers, not by a flow hash), no packet parsing, no
-payload processing, no reliability layer.
+are fed by independent producers, not by a flow hash), no payload processing
+(`on_packet()` is an empty hook), no reliability layer. Real ingest covers one
+UDP port on one NIC RX queue, IPv4 only.
 
 ## Next steps, roughly in order
 
-1. **Payload processing width.** Keep lane 0 as the CQ head, hand descriptors to
-   the rest of the warp for checksum/parse work.
-2. **Occupancy honesty.** A persistent kernel holds an SM forever, and with
+1. **Payload processing.** Give `on_packet()` (`include/gnp/packet_handler.hpp`)
+   a body. For width, keep lane 0 as the CQ head and hand descriptors to the
+   rest of the warp for checksum/parse work.
+2. **GPU-visible payloads.** The arena is host memory, so the CUDA poller calls
+   `on_packet()` with a null payload. Receiving straight into GPU memory
+   (DOCA GPUNetIO / GDAKI, or GPUDirect RDMA) fixes that and also removes the
+   RX thread's copy and the H2D descriptor flush.
+3. **Multi-queue real ingest.** One AF_XDP socket per NIC RX queue, each
+   feeding its own ring. The pollers and `xsks_map` already support it; the
+   ingest and `main.cpp` are what's limited to one queue.
+4. **Occupancy honesty.** A persistent kernel holds an SM forever, and with
    multi-queue it can hold many. Measure what that costs a co-resident compute
    kernel.
-3. **Real hardware.** Replace `sim_inject.cpp` with DOCA GPUNetIO / GDAKI, one
-   hardware Rx queue per ring. The ring, the owner-bit protocol and the kernel
-   should not need to change, and the copy streams disappear.
 
 Done: **multi-queue** (one ring per block, `N` rings polled independently) —
 see "Multi-queue".
+
+Done: **real ingest, v1** — AF_XDP + an XDP redirect on one UDP port replaced
+the simulator as `gnp`'s producer. The simulator moved to `testing/`.

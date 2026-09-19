@@ -1,9 +1,9 @@
 //
-// src/host/sim_inject.cpp - stand-in for the NIC.
+// testing/sim/sim_inject.cpp - stand-in for the NIC.
 //
-// A host thread that publishes completion descriptors at a paced rate. When
-// real hardware arrives this file is what gets replaced: the ring, the owner-bit
-// protocol and the poller all stay exactly as they are.
+// A host thread that publishes completion descriptors at a paced rate. It
+// shares ring_publish() with src/host/xdp_ingest.cpp, so the protocol it
+// exercises is exactly the one real traffic goes through.
 //
 
 #include <atomic>
@@ -18,12 +18,16 @@
 #include "gnp/common.hpp"
 #include "gnp/gpu_poll.hpp"
 #include "gnp/ring.hpp"
+#include "gnp_testing/sim.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
 
-namespace gnp {
+namespace gnp_testing {
+
+using namespace gnp;
+
 namespace {
 
 inline void cpu_relax() {
@@ -39,30 +43,10 @@ constexpr uint32_t kFlushBatch = 32;
 
 }  // namespace
 
-void sim_publish(const CompletionRing& ring, uint64_t idx, uint64_t payload_offset,
-                 uint32_t byte_len, uint32_t packet_id, uint64_t post_ns) {
-    CompletionDesc* d = &ring.descs[ring_slot(ring, idx)];
-
-    d->payload_offset = payload_offset;
-    d->byte_len = byte_len;
-    d->packet_id = packet_id;
-    d->post_ns = post_ns;
-    d->reserved = 0;
-
-    // Full barrier, not just a release fence. On x86 a release fence is only a
-    // compiler barrier, which is not enough here: these stores may land in
-    // write-combining PCIe-mapped memory, where the CPU is free to reorder them.
-    // A seq_cst fence emits a real mfence and drains the WC buffers.
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-
-    reinterpret_cast<std::atomic<uint32_t>*>(&d->status)
-        ->store(ring_expected_owner(ring, idx), std::memory_order_relaxed);
-}
-
 struct Simulator {
     std::thread thread;
     std::atomic<bool> stop{false};
-    SimStats stats;
+    IngestStats stats;
 };
 
 namespace {
@@ -119,7 +103,7 @@ void inject_loop(Simulator* sim, uint32_t queue, CompletionRing host_ring,
             const uint32_t id = static_cast<uint32_t>(produced);
             std::memcpy(arena + offset, &id, sizeof(id));
 
-            sim_publish(host_ring, produced, offset, cfg.payload_bytes, id, host_now_ns());
+            ring_publish(host_ring, produced, offset, cfg.payload_bytes, id, host_now_ns());
             ++produced;
         }
 
@@ -148,7 +132,7 @@ Simulator* sim_start(uint32_t queue, const CompletionRing& host_ring, Completion
     sim->thread =
         std::thread(inject_loop, sim, queue, host_ring, device_descs, ctrl, arena, cfg);
 #if defined(__linux__)
-    // Visible in top -H and /proc/<pid>/task/*/comm; scripts/bench.py uses it
+    // Visible in top -H and /proc/<pid>/task/*/comm; testing/scripts/bench.py uses it
     // to attribute CPU time to producers vs pollers.
     char name[16];
     std::snprintf(name, sizeof(name), "gnp-prod-%u", queue);
@@ -161,7 +145,7 @@ void sim_request_stop(Simulator* sim) {
     if (sim) sim->stop.store(true, std::memory_order_relaxed);
 }
 
-void sim_stop(Simulator* sim, SimStats& out) {
+void sim_stop(Simulator* sim, IngestStats& out) {
     if (!sim) return;
     sim_request_stop(sim);
     if (sim->thread.joinable()) sim->thread.join();
@@ -169,4 +153,4 @@ void sim_stop(Simulator* sim, SimStats& out) {
     delete sim;
 }
 
-}  // namespace gnp
+}  // namespace gnp_testing

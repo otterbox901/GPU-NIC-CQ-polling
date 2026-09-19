@@ -6,9 +6,9 @@
 
 set -euo pipefail
 
-BIN="${1:-./build/sim/gnp}"
+BIN="${1:-./build/dev/testing/gnp_sim}"
 if [[ ! -x "$BIN" ]]; then
-    echo "usage: $0 [path-to-gnp]   (built binary not found at '$BIN')" >&2
+    echo "usage: $0 [path-to-gnp_sim]   (built binary not found at '$BIN')" >&2
     exit 1
 fi
 

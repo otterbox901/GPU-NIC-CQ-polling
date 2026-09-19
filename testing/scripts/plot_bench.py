@@ -17,7 +17,7 @@ from collections import defaultdict
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 DATA = ROOT / "docs/bench/results.csv"
 OUT = ROOT / "docs/img"
 

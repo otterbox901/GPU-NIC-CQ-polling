@@ -7,55 +7,47 @@
       "hidden": true,
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "GNP_SIMULATION": "ON",
-        "GNP_BUILD_TESTS": "ON"
-      }
-    },
-    {
-      "name": "sim",
-      "inherits": "base",
-      "displayName": "Simulation (auto-detect CUDA)",
-      "description": "Default. Uses the CUDA backend if nvcc is found, the CPU poller otherwise.",
-      "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "GNP_ENABLE_CUDA": "ON"
+        "GNP_ENABLE_CUDA": "ON",
+        "GNP_ENABLE_XDP": "ON"
       }
     },
     {
-      "name": "sim-cpu",
+      "name": "prod",
       "inherits": "base",
-      "displayName": "Simulation (force CPU poller)",
+      "displayName": "Production",
+      "description": "Only gnp: AF_XDP ingest + CUDA poller (CPU poller if nvcc is missing). No testing code.",
+      "cacheVariables": { "GNP_BUILD_TESTING": "OFF" }
+    },
+    {
+      "name": "dev",
+      "inherits": "base",
+      "displayName": "Development (auto-detect CUDA)",
+      "description": "gnp plus testing/: gnp_sim, test_ring and ctest.",
+      "cacheVariables": { "GNP_BUILD_TESTING": "ON" }
+    },
+    {
+      "name": "dev-cpu",
+      "inherits": "dev",
+      "displayName": "Development (force CPU poller)",
       "description": "Ignores any installed CUDA toolkit. Useful for fast protocol iteration.",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "GNP_ENABLE_CUDA": "OFF"
-      }
+      "cacheVariables": { "GNP_ENABLE_CUDA": "OFF" }
     },
     {
       "name": "debug",
-      "inherits": "base",
+      "inherits": "dev",
       "displayName": "Debug",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "GNP_ENABLE_CUDA": "ON"
-      }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
     }
   ],
   "buildPresets": [
-    { "name": "sim", "configurePreset": "sim" },
-    { "name": "sim-cpu", "configurePreset": "sim-cpu" },
+    { "name": "prod", "configurePreset": "prod" },
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "dev-cpu", "configurePreset": "dev-cpu" },
     { "name": "debug", "configurePreset": "debug" }
   ],
   "testPresets": [
-    {
-      "name": "sim",
-      "configurePreset": "sim",
-      "output": { "outputOnFailure": true }
-    },
-    {
-      "name": "sim-cpu",
-      "configurePreset": "sim-cpu",
-      "output": { "outputOnFailure": true }
-    }
+    { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } },
+    { "name": "dev-cpu", "configurePreset": "dev-cpu", "output": { "outputOnFailure": true } }
   ]
 }
