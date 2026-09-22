@@ -180,31 +180,25 @@ void test_independent_rings() {
     CHECK(consumed_b == 300);
 }
 
-/// The report's aggregate: counters sum, latency pools, run time is the max
-/// (pollers run concurrently), and an idle queue must not drag min to zero.
+/// The report's aggregate: counters sum and run time is the max, since pollers
+/// run concurrently rather than back to back.
 void test_stats_aggregate() {
     gnp::PollStats q[3];
     for (gnp::PollStats& s : q) gnp::stats_reset(s);
 
     q[0].packets = 10; q[0].bytes = 1000; q[0].idle_spins = 5; q[0].gaps = 0;
-    q[0].lat_sum_ns = 400; q[0].lat_samples = 4; q[0].lat_min_ns = 50; q[0].lat_max_ns = 200;
     q[0].run_ns = 1000;
 
     q[1].packets = 30; q[1].bytes = 3000; q[1].idle_spins = 7; q[1].gaps = 2;
-    q[1].lat_sum_ns = 1200; q[1].lat_samples = 6; q[1].lat_min_ns = 30; q[1].lat_max_ns = 500;
     q[1].run_ns = 1500;
 
-    // q[2]: saw nothing. lat_min_ns stays at its ~0 sentinel, lat_samples 0.
+    // q[2]: saw nothing, and must not affect the aggregate.
 
     const gnp::PollStats a = gnp::stats_aggregate(q, 3);
     CHECK(a.packets == 40);
     CHECK(a.bytes == 4000);
     CHECK(a.idle_spins == 12);
     CHECK(a.gaps == 2);
-    CHECK(a.lat_sum_ns == 1600);
-    CHECK(a.lat_samples == 10);
-    CHECK(a.lat_min_ns == 30);
-    CHECK(a.lat_max_ns == 500);
     CHECK(a.run_ns == 1500);
 
     // A single queue must aggregate to itself, so N=1 reports are unchanged.

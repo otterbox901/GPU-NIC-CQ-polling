@@ -3,10 +3,10 @@
 
 Runs the same workloads on both builds and writes one CSV row per run:
 
-  paced    50 kpps per queue, 1-5 queues: detection latency and host CPU
+  paced    50 kpps per queue, 1-5 queues: host CPU spent polling
            (kept under the simulator's ~0.45 Mpps paced-flush ceiling)
   unpaced  no pacing, 64-entry rings, 1-5 queues: throughput
-  split    GPU only, 400 kpps total spread over 1/2/4/8 queues
+  copy     GPU only, same as paced plus sampled H2D flush timing
 
 Host CPU is measured per thread from /proc: producers are named gnp-prod-N,
 CPU-fallback pollers gnp-poll-N, everything else (main thread, CUDA driver
@@ -34,8 +34,7 @@ CLK_TCK = os.sysconf("SC_CLK_TCK")
 
 FIELDS = [
     "scenario", "backend", "queues", "pps_per_queue", "ring", "run",
-    "published", "observed", "gaps", "achieved_mpps", "lat_mean_us", "lat_max_us",
-    "copy_us", "outside_copy_us", "poll_period_us",
+    "published", "observed", "gaps", "achieved_mpps", "copy_us", "poll_period_us",
     "cores_poll", "cores_prod", "cores_other",
 ]
 
@@ -44,11 +43,10 @@ PATTERNS = {
     "observed": r"packets observed\s+(\d+)",
     "gaps": r"packet-id gaps\s+(\d+)",
     "achieved_mpps": r"achieved rate\s+([\d.]+) Mpps",
-    "lat_mean_us": r"^  mean\s+([\d.]+) us",
-    "lat_max_us": r"^  max\s+([\d.]+) us",
-    # CUDA only: sampled H2D flush time, and the mean latency outside it (signed).
+    # CUDA only: the sampled H2D flush time. Measured with one clock on the host
+    # side of the copy, so unlike a publish -> observe latency it needs no
+    # comparison against the GPU's clock.
     "copy_us": r"H2D flush, submit->done\s+([\d.]+) us",
-    "outside_copy_us": r"outside H2D flush\s+(-?[\d.]+) us",
     # Single-queue runs only.
     "poll_period_us": r"poll loop period\s+([\d.]+) us",
 }
@@ -162,8 +160,6 @@ def main():
         for backend, binary in (("gpu", args.gpu), ("cpu", args.cpu)):
             plan.append(("paced", backend, binary, q, 50000, 1024, 2000))
             plan.append(("unpaced", backend, binary, q, 0, 64, 1000))
-    for q in (1, 2, 4, 8):
-        plan.append(("split", "gpu", args.gpu, q, 400000 // q, 1024, 2000))
     # Same as "paced" on the GPU, plus sampled H2D flush timing. Kept separate:
     # the sampling stalls the producer, so the other scenarios run without it.
     for q in queue_counts:

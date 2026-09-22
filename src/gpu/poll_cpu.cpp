@@ -40,7 +40,6 @@ void poll_loop(CompletionRing ring, RingControl* ctrl, PollStats* stats, const u
     const uint64_t t_start = host_now_ns();
 
     PollStats s = {};
-    s.lat_min_ns = ~0ull;
 
     unsigned long long idx = 0;
     uint32_t next_id = 0;
@@ -58,23 +57,11 @@ void poll_loop(CompletionRing ring, RingControl* ctrl, PollStats* stats, const u
         if (desc_ready(status_of(d)->load(std::memory_order_acquire), want)) {
             const uint32_t len = d->byte_len;
             const uint32_t pid = d->packet_id;
-            const uint64_t post_ns = d->post_ns;
 
             on_packet(*d, arena ? arena + d->payload_offset : nullptr);
 
-            long long lat = static_cast<long long>(host_now_ns()) - static_cast<long long>(post_ns);
-            if (lat < 0) {
-                lat = 0;
-                ++s.clamped;
-            }
-            const unsigned long long ulat = static_cast<unsigned long long>(lat);
-
             ++s.packets;
             s.bytes += len;
-            s.lat_sum_ns += ulat;
-            ++s.lat_samples;
-            if (ulat < s.lat_min_ns) s.lat_min_ns = ulat;
-            if (ulat > s.lat_max_ns) s.lat_max_ns = ulat;
             if (have_prev && pid != next_id) ++s.gaps;
             next_id = pid + 1;
             have_prev = true;
@@ -162,12 +149,10 @@ void backend_free_host(void* p) {
     if (p) ::operator delete(p, std::align_val_t(64));
 }
 
-int64_t backend_clock_offset_ns() { return 0; }
-
 uint32_t backend_max_queues() { return kMaxQueues; }
 
 bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* arenas,
-                           uint32_t n_queues, int64_t /*clock_offset_ns*/, const RunConfig& cfg) {
+                           uint32_t n_queues, const RunConfig& cfg) {
     if (n_queues == 0 || n_queues > kMaxQueues) {
         std::fprintf(stderr, "[gnp] cpu-fallback supports 1..%u queues, got %u\n", kMaxQueues,
                      n_queues);

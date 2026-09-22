@@ -25,24 +25,17 @@ void row_f64(const char* label, double v, const char* unit) {
 /// scripts that grep the summary only ever match the aggregate.
 void report_per_queue(const PollStats* poll, const IngestStats* sim, uint32_t n_queues) {
     std::printf("\n  per-queue breakdown\n");
-    std::printf("  %-5s %11s %11s %6s %8s %10s %9s %10s %10s\n", "queue", "published",
-                "observed", "gaps", "stalls", "idle/pkt", "us/pkt", "lat avg us", "lat max us");
+    std::printf("  %-5s %11s %11s %6s %8s %10s %9s\n", "queue", "published", "observed", "gaps",
+                "stalls", "idle/pkt", "us/pkt");
     rule();
     for (uint32_t q = 0; q < n_queues; ++q) {
         const PollStats& p = poll[q];
         const double idle_per_pkt =
             p.packets ? static_cast<double>(p.idle_spins) / p.packets : 0.0;
         const double svc_us = p.packets ? (p.run_ns / static_cast<double>(p.packets)) / 1e3 : 0.0;
-        std::printf("  %-5u %11llu %11llu %6llu %8llu %10.3f %9.3f", q,
+        std::printf("  %-5u %11llu %11llu %6llu %8llu %10.3f %9.3f\n", q,
                     static_cast<unsigned long long>(sim[q].produced), p.packets, p.gaps,
                     static_cast<unsigned long long>(sim[q].overruns), idle_per_pkt, svc_us);
-        if (p.lat_samples) {
-            std::printf(" %10.3f %10.3f\n",
-                        (p.lat_sum_ns / static_cast<double>(p.lat_samples)) / 1000.0,
-                        p.lat_max_ns / 1000.0);
-        } else {
-            std::printf(" %10s %10s\n", "-", "-");
-        }
     }
 }
 
@@ -56,13 +49,8 @@ PollStats stats_aggregate(const PollStats* poll, uint32_t n_queues) {
         a.packets += p.packets;
         a.bytes += p.bytes;
         a.idle_spins += p.idle_spins;
-        a.lat_sum_ns += p.lat_sum_ns;
-        a.lat_samples += p.lat_samples;
         a.gaps += p.gaps;
-        a.clamped += p.clamped;
         a.drain_spins += p.drain_spins;
-        if (p.lat_samples && p.lat_min_ns < a.lat_min_ns) a.lat_min_ns = p.lat_min_ns;
-        if (p.lat_max_ns > a.lat_max_ns) a.lat_max_ns = p.lat_max_ns;
         if (p.run_ns > a.run_ns) a.run_ns = p.run_ns;
     }
     return a;
@@ -85,8 +73,7 @@ IngestStats ingest_aggregate(const IngestStats* sim, uint32_t n_queues) {
 }
 
 void report(const RunConfig& cfg, const PollStats* per_queue_poll, const IngestStats* per_queue_sim,
-            uint32_t n_queues, const char* backend, const char* ingest_label,
-            int64_t clock_offset_ns) {
+            uint32_t n_queues, const char* backend, const char* ingest_label) {
     const PollStats poll = stats_aggregate(per_queue_poll, n_queues);
     const IngestStats sim = ingest_aggregate(per_queue_sim, n_queues);
     const bool multi = n_queues > 1;
@@ -163,40 +150,6 @@ void report(const RunConfig& cfg, const PollStats* per_queue_poll, const IngestS
         std::printf("  %-28s %14lld %s\n", "NOT observed", missed,
                     "(poller stopped before drain?)");
     }
-
-    if (multi) {
-        std::printf("\n  detection latency (publish -> SM observes, pooled over all queues)\n");
-    } else {
-        std::printf("\n  detection latency (publish -> SM observes)\n");
-    }
-    rule();
-    if (poll.lat_samples) {
-        row_f64("min", poll.lat_min_ns / 1000.0, "us");
-        row_f64("mean", (poll.lat_sum_ns / static_cast<double>(poll.lat_samples)) / 1000.0, "us");
-        row_f64("max", poll.lat_max_ns / 1000.0, "us");
-        if (sim.copy_samples) {
-            // Everything in the mean that is not the flush: batch-fill wait
-            // before it (unpaced runs) plus the poller's reaction after it.
-            // Signed on purpose: the flush figure reads ~1.4 us high (host
-            // wake-up) and the mean carries the ~2 us clock-offset error, so
-            // a negative value means "below what this subtraction resolves".
-            // "poll loop period" above is the direct reaction estimate.
-            const double rest_ns =
-                poll.lat_sum_ns / static_cast<double>(poll.lat_samples) -
-                sim.copy_ns_sum / static_cast<double>(sim.copy_samples);
-            std::printf("  %-28s %14.3f us   (mean - H2D flush, +/- ~2 us)\n",
-                        "outside H2D flush", rest_ns / 1000.0);
-        }
-        if (poll.clamped) {
-            row_u64("clamped to zero", poll.clamped, "(clock-offset error)");
-        }
-    } else if (poll.packets) {
-        std::printf("  %-28s %14s\n", "latency", "(not sampled)");
-    } else {
-        std::printf("  %-28s %14s\n", "no packets observed", "-");
-    }
-    std::printf("  cross-clock offset applied: %+lld ns (calibrated, ~2 us accurate)\n",
-                static_cast<long long>(clock_offset_ns));
 
     if (multi) report_per_queue(per_queue_poll, per_queue_sim, n_queues);
     std::printf("\n");

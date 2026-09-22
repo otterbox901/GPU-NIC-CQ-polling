@@ -110,9 +110,9 @@ Control/stats stay in pinned mapped memory (both sides read/write them). The
 payload arena is ordinary host memory — the poller never inspects packet bytes.
 
 `cudaMallocManaged` with a GPU-preferred location was tried first and abandoned:
-bidirectional touch thrash-migrates pages and shows up as multi-millisecond
-detection latency. A real NIC will DMA straight into the device CQ and the flush
-step disappears; the poller does not change.
+bidirectional touch thrash-migrates pages, which showed up as multi-millisecond
+stalls before a descriptor was observed. A real NIC will DMA straight into the
+device CQ and the flush step disappears; the poller does not change.
 
 Device-side CQ loads use `ld.acquire.gpu` on the owner bit so payload fields
 cannot float above the status store.
@@ -139,7 +139,7 @@ poller runs *exactly* the single-queue loop.
 - **Several lanes polling one ring.** Lanes would have to claim slots through a
   shared counter or a CAS on the owner bit. That is true sharing — every claim
   serialises on one cache line — and it breaks the in-order cursor that gap
-  detection, latency sampling and the drain protocol rely on.
+  detection and the drain protocol rely on.
 - **Padding descriptors apart.** Padding cures *false* sharing between
   independent writers. The claim counter above is *true* sharing, which padding
   cannot fix; and spreading CQEs over separate cache lines would undo the
@@ -179,8 +179,8 @@ Measured on a GTX 1650 with a 12-thread host:
 
 - One copy stream shared by all queues serialises every producer's flushes:
   8 queues × 100 kpps delivered about 0.1 Mpps in total.
-- One stream per queue removes that. It also gives the best latency up to
-  32 queues — 16 µs mean at 32 × 25 kpps, vs 27–178 µs with 2–16 shared streams.
+- One stream per queue removes that, and it stayed the best arrangement up to
+  32 queues when this was measured against 2–16 shared streams.
 - The streams must exist **before** the pollers launch. Per-thread default
   streams, which the driver creates lazily on first use (mid-run, from producer
   threads), were unreliable: at 32–128 queues most flushes did not execute while
@@ -209,10 +209,9 @@ a real NIC DMAs into the device CQ itself and has no copy streams.
   compare `--queues 4 --pps 100000` with `--queues 1 --pps 400000`, not with
   `--queues 1 --pps 100000`.
 - The report's top sections are the aggregate, under the same labels as a
-  single-queue run: counters summed, latency pooled (min of mins, max of maxes,
-  total sum / total samples), and the producer window is the union.
+  single-queue run: counters summed, and the producer window is the union.
   `scripts/run_sim.sh` therefore parses N-queue runs unchanged. A per-queue
-  table follows, and it matters: a pooled mean can hide one straggling queue.
+  table follows, and it matters: an aggregate can hide one straggling queue.
   For `N = 1` the output is identical to the pre-multi-queue format.
 - `service time` is omitted from the aggregate: pollers run concurrently, so
   wall time divided by total packets is no single poller's service time. The
@@ -225,30 +224,20 @@ All numbers come from `scripts/bench.py` (raw data in
 every run delivered every packet with zero gaps. `scripts/plot_bench.py`
 redraws the README charts from the same file.
 
-Unpaced, 64-entry rings: throughput scales with queue count while latency stays
-flat.
+Unpaced, 64-entry rings: throughput scales with the queue count.
 
-| queues | delivered | mean latency |
-|---|---|---|
-| 1 | 3.0 Mpps | 10.7 µs |
-| 2 | 6.0 Mpps | 10.1 µs |
-| 3 | 8.9 Mpps | 10.1 µs |
-| 4 | 11.6 Mpps | 10.5 µs |
-| 5 | 14.3 Mpps | 10.5 µs |
+| queues | delivered |
+|---|---|
+| 1 | 3.0 Mpps |
+| 2 | 6.0 Mpps |
+| 3 | 8.9 Mpps |
+| 4 | 11.6 Mpps |
+| 5 | 14.3 Mpps |
 
-The same 400 kpps total, split over more queues:
-
-| queues × rate | mean latency | range over 5 runs |
-|---|---|---|
-| 1 × 400 kpps | 18.9 µs | 14.6 – 29.1 µs |
-| 2 × 200 kpps | 11.4 µs | 9.3 – 12.9 µs |
-| 4 × 100 kpps | 7.2 µs | 6.9 – 8.6 µs |
-| 8 × 50 kpps | 6.6 µs | 6.1 – 7.9 µs |
-
-At this rate a single queue is limited by one producer thread submitting
-~400k small copies a second to one stream. The result is noisy, and it is a
-property of the simulated NIC rather than of the poller. Spreading the load
-over 4–8 queues both lowers latency and steadies it.
+At 400 kpps through a single queue, one producer thread submitting ~400k small
+copies a second to one stream is the bottleneck, and the run-to-run spread is
+wide. That is a property of the simulated NIC rather than of the poller;
+spreading the same total over 4–8 queues steadies it.
 
 ### GPU poller vs CPU fallback
 
@@ -259,26 +248,25 @@ per queue. The README's first page charts the comparison. In short:
   count, against one full core per queue for the CPU fallback. This is measured
   per thread from `/proc`, using the `gnp-poll-N` and `gnp-prod-N` thread names,
   with the producers excluded.
-- **Latency and throughput** favour the CPU fallback: 0.1–1.2 µs mean and up to
-  76 Mpps, against about 6 µs and 14 Mpps on the GPU. That is because the
-  simulator writes the CPU poller's ring directly, with no PCIe crossing, while
-  the GPU path copies every batch over PCIe. A real NIC puts both paths behind
-  PCIe DMA, so this comparison flatters the CPU. The host-CPU result does not
-  depend on the simulator.
-- **The copy is nearly all of the GPU latency.** With `--copy-timing`, the
-  sampled H2D flush is 5.1–5.7 µs of a 5.5–6.0 µs mean. The poller's own
-  reaction is best read off `poll loop period` (1.3 µs per idle iteration, so
-  ~0.65 µs on average). See "Splitting the latency" below.
+- **Throughput** favours the CPU fallback: up to 76 Mpps against 14 Mpps on the
+  GPU. That is because the simulator writes the CPU poller's ring directly, with
+  no PCIe crossing, while the GPU path copies every batch over PCIe. A real NIC
+  puts both paths behind PCIe DMA, so this comparison flatters the CPU. The
+  host-CPU result does not depend on the simulator.
+- **The PCIe copy dominates the GPU path.** With `--copy-timing`, the sampled
+  H2D flush is 5.1–5.7 µs per batch, while the poller's own reaction is one
+  `poll loop period` at worst (1.3 µs per idle iteration, so ~0.65 µs on
+  average). See "The two figures that do get measured" below.
 
 ### Limits
 
 - **Paced flush ceiling.** Paced runs issue one `cudaMemcpyAsync` per packet,
   and on this machine that caps out near 0.45 Mpps in total whatever `N` is.
-  Past it, rings fill and latency measures the copy backlog, not the pollers.
+  Past it, rings fill and the run measures the copy backlog, not the pollers.
   Unpaced runs batch 32 CQEs per copy and do not hit this ceiling.
 - **Host threads.** Every simulated producer busy-spins. With more producers
-  than hardware threads they preempt each other (and CUDA's internal locks),
-  and latency reflects host scheduling. The program warns when this happens.
+  than hardware threads they preempt each other (and CUDA's internal locks), and
+  the results reflect host scheduling. The program warns when this happens.
   The CPU backend needs two spinning threads per queue.
 - **SM budget.** Each poller holds a whole block slot for one spinning thread.
   The residency limit allows hundreds of queues, but in any real deployment `N`
@@ -302,30 +290,27 @@ GPU indefinitely.
 entries. The producer uses it for back-pressure. It is deliberately stale — a
 lagging watermark only ever makes the producer more conservative.
 
-## Latency measurement
+## Timing, and what is not measured
 
-`%globaltimer` and `std::chrono::steady_clock` do not share an epoch, so the kernel is
-handed a precomputed `clock_offset_ns`.
+Two clocks exist and they are never compared. The host stamps every descriptor's
+`post_ns` with `steady_clock`; the kernel reads `%globaltimer` only for
+device-side intervals (how long the poller ran, when to retire). There is no
+publish → observe latency in the summary, because on this hardware the
+comparison those two clocks would need is not accurate enough to report: the
+offset can be pinned to about ±1 µs, but it then drifts by 2 to 326 ppm over a
+run, with a sign and size that vary run to run. The reasoning, the measurements
+and what it would take to do properly are in
+[`../docs/README.md`](README.md#why-latency-is-not-reported).
 
-Calibration (`backend_clock_offset_ns`) launches a probe kernel that spins on a
-host flag, waits for it to become resident, then times the flag raise. Having
-the kernel already spinning is the point: launching a kernel just to read the
-timer would fold ~10 µs of launch latency into the offset. The best of 16
-samples lands within roughly ±2 µs.
+What is measured instead needs no second clock: the poll loop period from the
+poller's own counters, the H2D flush timed on the host at both ends, and the
+counters.
 
-The residual bias is one PCIe hop and it *under*-reports latency slightly, since
-the GPU observes the flag after the host timestamp. Latencies that come out
-negative are clamped to zero and counted in `PollStats::clamped` — a non-zero
-count there means the calibration, not the poller, needs attention.
+### The two figures that do get measured
 
-### Splitting the latency: H2D flush vs poll reaction
-
-On the CUDA backend the publish → observe latency includes the simulator's H2D
-flush. The CPU fallback has no flush, so without splitting it off the two
-backends can't be compared. The split uses two independent measurements, since
-no single timeline covers both. The copy engine and the poll loop run
-concurrently, so there is no point where the poller "waits for the copy" that
-a timer could pause around.
+The copy engine and the poll loop run concurrently, so there is no point where
+the poller "waits for the copy" that a timer could pause around. Each is
+measured on its own instead.
 
 - **Flush time (`--copy-timing`, CUDA only).** `backend_flush_descs` times 1 in
   32 calls per queue: `host_now_ns()` before the `cudaMemcpyAsync` calls and
@@ -338,23 +323,20 @@ a timer could pause around.
   iterations. A CQE that lands mid-iteration waits for the next status load,
   about half a period on average. This needs no clock offset.
 
-The report also prints `outside H2D flush` = mean latency − mean flush. That
-residual is only good to about ±2 µs, and it can go negative. Three reasons:
-the flush figure reads ~1.4 µs high (host wake-up after the sync), the mean
-carries the clock-offset error, and the two are sampled on different packets.
-In unpaced runs it also includes the time a CQE waits for its 32-entry batch
-to fill before the flush starts.
+Both are honest on their own terms, and neither is subtracted from the other:
+the flush reads ~1.4 µs high (host wake-up after the sync), and in unpaced runs
+a CQE also waits for its 32-entry batch to fill before the flush starts.
 
 Rejected approaches:
 
 - **CUDA event pair around the copy.** On the GTX 1650, recording events
   around a 32-byte H2D copy more than doubled the time until a spinning kernel
-  saw the data (3.5 → 8 µs), and the pair read 5.7 µs for a ~3 µs copy. The
-  flush then came out longer than the total latency.
+  saw the data (3.5 → 8 µs), and the pair read 5.7 µs for a ~3 µs copy: the
+  measurement changed what it was measuring.
 - **Always-on sampling.** The sampled sync stalls the producer, which throttles
-  the copy backlog near saturation: 2 × 200 kpps went from ~11 µs to ~7 µs
-  mean. At 50 kpps there was no measurable effect. Hence opt-in, so ordinary
-  runs report an unperturbed total.
+  the copy backlog near saturation and changes the flush time it reports. At
+  50 kpps there was no measurable effect. Hence opt-in, so ordinary runs are
+  undisturbed.
 - **Timing every flush** would put a sync on every batch.
 - **A non-blocking event pool**, drained later, wouldn't stall the producer,
   but events slow the copy itself on this GPU (see above).

@@ -34,8 +34,7 @@ PollQueue*   g_dev_queues = nullptr;  ///< device copy of the launch's PollQueue
 /// that queue's publish limit. One thread per block on purpose: a CQ is
 /// consumed in order, so width comes from more queues, not more lanes.
 __global__ void gnp_poll_kernel(const PollQueue* queues, unsigned int n_queues,
-                                long long clock_offset_ns, unsigned long long max_run_ns,
-                                unsigned int idle_backoff_ns) {
+                                unsigned long long max_run_ns, unsigned int idle_backoff_ns) {
     if (threadIdx.x != 0 || blockIdx.x >= n_queues) return;
 
     // Read once at entry, never again: the hot loop below only touches this
@@ -53,7 +52,6 @@ __global__ void gnp_poll_kernel(const PollQueue* queues, unsigned int n_queues,
     const unsigned long long t_start = device_now_ns();
 
     PollStats s = {};
-    s.lat_min_ns = ~0ull;
 
     unsigned long long idx = 0;
     unsigned int next_id = 0;
@@ -76,28 +74,11 @@ __global__ void gnp_poll_kernel(const PollQueue* queues, unsigned int n_queues,
         if (desc_ready(st, want)) {
             const unsigned int len = descs[slot].byte_len;
             const unsigned int pid = descs[slot].packet_id;
-            const unsigned long long post_ns = descs[slot].post_ns;
 
             // The arena is host memory, so the kernel has no payload pointer.
-            const CompletionDesc observed{descs[slot].payload_offset, len, pid, post_ns, 0u, st};
+            const CompletionDesc observed{descs[slot].payload_offset, len, pid,
+                                          descs[slot].post_ns, 0u, st};
             on_packet(observed, nullptr);
-
-            // Sample latency every 16th packet — %globaltimer every hit was
-            // measurable overhead on the critical path.
-            if ((s.packets & 15ull) == 0) {
-                const long long now_host =
-                    static_cast<long long>(device_now_ns()) + clock_offset_ns;
-                long long lat = now_host - static_cast<long long>(post_ns);
-                if (lat < 0) {
-                    lat = 0;
-                    ++s.clamped;
-                }
-                const unsigned long long ulat = static_cast<unsigned long long>(lat);
-                s.lat_sum_ns += ulat;
-                ++s.lat_samples;
-                if (ulat < s.lat_min_ns) s.lat_min_ns = ulat;
-                if (ulat > s.lat_max_ns) s.lat_max_ns = ulat;
-            }
 
             ++s.packets;
             s.bytes += len;
@@ -155,7 +136,7 @@ uint32_t backend_max_queues() {
 }
 
 bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* /*arenas*/,
-                           uint32_t n_queues, int64_t clock_offset_ns, const RunConfig& cfg) {
+                           uint32_t n_queues, const RunConfig& cfg) {
     // session_create already enforces this; re-check because a launch past the
     // residency limit does not fail - it hangs forever in backend_wait_poller.
     const uint32_t max_queues = backend_max_queues();
@@ -194,8 +175,8 @@ bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* /*aren
                         : "");
     }
 
-    gnp_poll_kernel<<<n_queues, 1, 0, g_stream>>>(g_dev_queues, n_queues, clock_offset_ns,
-                                                  max_run_ns, cfg.idle_backoff_ns);
+    gnp_poll_kernel<<<n_queues, 1, 0, g_stream>>>(g_dev_queues, n_queues, max_run_ns,
+                                                  cfg.idle_backoff_ns);
 
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {

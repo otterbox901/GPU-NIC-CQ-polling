@@ -10,8 +10,8 @@ for building `gnp` itself.
 | 1. protocol | `test_ring` (ctest) | nothing | owner-bit ring logic, wrap-around, queue independence |
 | 2. pollers | `gnp_sim` + `run_sim.sh` | a build | the GPU/CPU pollers drain every packet, in order, under load |
 | 3. ingest | `gnp` + veth + `replay_pcap.py` | root, libxdp | XDP → AF_XDP → ring → poller works on real frames |
-| 4. hardware | `gnp` + NIC + `tcpreplay` | root, a second machine | the same, at line rate on a real NIC |
-| perf | `bench.py` + `plot_bench.py` | CUDA and CPU builds | the numbers in [docs/README.md](../docs/README.md) |
+| 4. hardware | `gnp` + NIC + a sender | root, a second machine | the same, on a physical NIC |
+| perf | `bench.py` + `plot_bench.py` | CUDA and CPU builds | host CPU, throughput and H2D flush ([results](../docs/README.md)) |
 
 ## Build
 
@@ -58,6 +58,7 @@ testing/scripts/run_sim.sh ./build/dev/testing/gnp_sim       # ~20 s
 testing/scripts/run_sim.sh ./build/dev-cpu/testing/gnp_sim
 ```
 
+
 The sweep covers paced, unpaced, bursty, jumbo, near-idle, fixed-count and
 multi-queue runs, plus rejection of too many queues. A run passes only with
 zero `packet-id gaps` and `descriptors published` == `packets observed`. The
@@ -100,11 +101,15 @@ one slow queue.
 
 ```
   per-queue breakdown
-  queue   published    observed   gaps   stalls   idle/pkt    us/pkt lat avg us lat max us
+  queue   published    observed   gaps   stalls   idle/pkt    us/pkt lat avg us lat max us    neg
   --------------------------------------------------
-  0           99973       99973      0        0      7.136    10.006      8.314    162.746
-  1          100004      100004      0        0      7.136    10.003      7.291    147.929
+  0          100012      100012      0        0      7.341    10.002     15.917     45.906      0
+  1          100007      100007      0        0      7.343    10.003     15.696     80.548      0
 ```
+
+`gnp` reports no publish -> observe latency; see
+[docs/README.md](../docs/README.md#why-latency-is-not-reported) for why. Read
+`us/pkt` and the aggregate `poll loop period` instead.
 
 ## 3. Real ingest path: pcap replay over veth
 
@@ -141,6 +146,11 @@ sudo ip link del veth0   # cleanup
 Start the sender only while `gnp` is capturing. Frames sent outside the window
 go to the kernel stack, and the report shows `XDP program: 0 frames`.
 
+Any second device works as the sender. A phone tethered over USB is the least
+trouble: it appears as an ordinary interface (`ipheth`, e.g. `eth0`), and a few
+lines of Python in a terminal app send to it, so no capture or extra tool is
+needed. Run `gnp` against that interface with `--skb-mode` exactly as below.
+
 **Reference run** (2026-09-18, GTX 1650, CUDA poller, generic XDP on veth):
 
 ```
@@ -150,16 +160,11 @@ go to the kernel stack, and the report shows `XDP program: 0 frames`.
   packets observed                      10000
   bytes observed                      5120000
   packet-id gaps                            0
-  min / mean / max latency     44.8 / 47.6 / 93.5 us
 ```
 
 Every frame the replay sent was matched by XDP, published, and observed by the
 GPU, with 512 payload bytes each. `achieved rate` in that run reads 0.000 Mpps
-because it divides by the whole 30 s window, not the 2 s of traffic. The
-latency is much higher than the simulator's ~6 µs at 100 kpps. The simulator is
-also slow at very low rates (31 µs at 1 pps), so at 5 kpps the GPU and PCIe
-are probably idling into power-saving states between packets. That is
-unverified.
+because it divides by the whole 30 s window, not the 2 s of traffic.
 
 ## 4. Real NIC: tcpreplay from a second machine
 

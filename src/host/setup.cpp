@@ -20,10 +20,7 @@ uint64_t host_now_ns() {
             .count());
 }
 
-void stats_reset(PollStats& s) {
-    std::memset(&s, 0, sizeof(s));
-    s.lat_min_ns = ~0ull;
-}
+void stats_reset(PollStats& s) { std::memset(&s, 0, sizeof(s)); }
 
 namespace {
 
@@ -120,16 +117,12 @@ bool session_create(const RunConfig& cfg, Session& out) {
         return false;
     }
 
-    out.clock_offset_ns = backend_clock_offset_ns();
-
     if (cfg.verbose) {
         const size_t desc_bytes = static_cast<size_t>(cfg.ring_capacity) * sizeof(CompletionDesc);
         std::printf("[gnp] memory: %s\n", backend_memory_strategy());
-        std::printf("[gnp] %u queue(s) x ring: %u entries (%zu KiB), arena %zu KiB (host-only), "
-                    "clock offset %+lld ns\n",
+        std::printf("[gnp] %u queue(s) x ring: %u entries (%zu KiB), arena %zu KiB (host-only)\n",
                     cfg.queues, cfg.ring_capacity, desc_bytes / 1024,
-                    out.queues[0].arena_bytes / 1024,
-                    static_cast<long long>(out.clock_offset_ns));
+                    out.queues[0].arena_bytes / 1024);
         for (size_t i = 0; i < out.queues.size(); ++i) {
             const QueueSession& q = out.queues[i];
             std::printf("[gnp] queue %zu ring pointers: host_staging=%p device_cq=%p%s\n", i,

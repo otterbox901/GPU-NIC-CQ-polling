@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
     }
 
     if (!gnp::backend_launch_poller(poll_queues.data(), arenas.data(), static_cast<uint32_t>(n),
-                                    session.clock_offset_ns, cfg)) {
+                                    cfg)) {
         gnp::session_destroy(session);
         return 1;
     }
@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
     for (size_t q = 0; q < n; ++q) poll_stats[q] = *session.queues[q].stats;
 
     gnp::report(cfg, poll_stats.data(), sim_stats.data(), static_cast<uint32_t>(n),
-                gnp::backend_name(), "simulated NIC", session.clock_offset_ns);
+                gnp::backend_name(), "simulated NIC");
     gnp::session_destroy(session);
     return ok ? 0 : 1;
 }

@@ -14,3 +14,6 @@ compile_commands.json
 *.nsys-rep
 *.ncu-rep
 core.*
+
+# Python bytecode from the testing scripts
+__pycache__/

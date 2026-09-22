@@ -221,46 +221,23 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
 
     cpu_cores = {b: median(g, "paced", b, "cores_polling") for b in ("gpu", "cpu")}
-    latency = {b: median(g, "paced", b, "lat_mean_us") for b in ("gpu", "cpu")}
     tput = {b: median(g, "unpaced", b, "achieved_mpps") for b in ("gpu", "cpu")}
-    split = {"gpu": median(g, "split", "gpu", "lat_mean_us")}
-    # The GPU mean beside its sampled H2D flush, both from the "copy" runs
-    # (--copy-timing). Side by side, not stacked: the flush reads slightly high
-    # (see metrics.cpp), so it can exceed the mean, and a stack would hide that.
-    copy_mean = median(g, "copy", "gpu", "lat_mean_us")
-    flush = median(g, "copy", "gpu", "copy_us")
-    split_bars = {"gpu": copy_mean, "flush": flush, "cpu": latency["cpu"]}
+    flush = {"flush": median(g, "copy", "gpu", "copy_us")}
     queues = sorted(cpu_cores["cpu"])
-    split_q = sorted(split["gpu"])
-    split_cats = [f"{q} × {400 // q}k" for q in split_q]
-    split_data = {"gpu": {c: split["gpu"][q] for c, q in zip(split_cats, split_q)}}
 
     def desc(d):
         return "; ".join(f"{NAMES[b]}: " + ", ".join(f"{k} -> {fmt(v)}" for k, v in s.items())
                          for b, s in d.items())
 
     charts = {
-        "latency-split": lambda th: grouped_columns(
-            th, "The GPU's latency is almost all H2D flush",
-            "Mean detection latency beside the sampled flush time, 50 kpps per queue.",
-            "µs", "queues", queues, split_bars, desc(split_bars), digits=2),
         "host-cpu": lambda th: grouped_columns(
             th, "Host CPU spent on polling",
             "Cores busy in the poll path, 50 kpps per queue. The GPU poller uses none.",
             "cores", "queues", queues, cpu_cores, desc(cpu_cores), digits=2),
-        "latency": lambda th: grouped_columns(
-            th, "Detection latency, publish to observe",
-            "Mean per run, 50 kpps per queue. The GPU path includes a PCIe copy the CPU path skips.",
-            "µs", "queues", queues, latency, desc(latency), digits=2),
         "throughput": lambda th: lines(
             th, "Throughput, unpaced",
             "Packets delivered per second, 64-entry rings. Both backends scale with queues.",
             "Mpps", "queues", queues, tput, desc(tput), unit=" Mpps"),
-        "multiqueue-latency": lambda th: grouped_columns(
-            th, "GPU: same 400 kpps, split over more queues",
-            "Mean detection latency. Each queue has its own producer, copy stream and poller.",
-            "µs", "queues × rate per queue", split_cats, split_data, desc(split_data),
-            label="all", digits=1),
     }
     for name, make in charts.items():
         for th in THEMES:
@@ -270,20 +247,13 @@ def main():
     print(f"wrote {len(charts) * len(THEMES)} SVGs to {OUT}\n")
 
     # Tables for the README (the charts' table-view twins)
-    print("| queues | host cores polling (GPU / CPU) | mean latency µs (GPU / CPU) "
-          "| unpaced Mpps (GPU / CPU) |")
+    print("| queues | host cores polling (GPU / CPU) | unpaced Mpps (GPU / CPU) "
+          "| GPU H2D flush µs |")
     print("|---|---|---|---|")
     for q in queues:
         print(f"| {q} | {cpu_cores['gpu'][q]:.2f} / {cpu_cores['cpu'][q]:.2f} "
-              f"| {latency['gpu'][q]:.1f} / {latency['cpu'][q]:.2f} "
-              f"| {tput['gpu'][q]:.1f} / {tput['cpu'][q]:.1f} |")
-    print("\n| queues | GPU mean µs | GPU H2D flush µs | CPU mean µs |")
-    print("|---|---|---|---|")
-    for q in queues:
-        print(f"| {q} | {copy_mean[q]:.2f} | {flush[q]:.2f} | {latency['cpu'][q]:.2f} |")
-    print("\n| queues × rate | mean latency µs |\n|---|---|")
-    for c in split_cats:
-        print(f"| {c} | {split_data['gpu'][c]:.1f} |")
+              f"| {tput['gpu'][q]:.1f} / {tput['cpu'][q]:.1f} "
+              f"| {flush['flush'][q]:.2f} |")
 
 
 if __name__ == "__main__":

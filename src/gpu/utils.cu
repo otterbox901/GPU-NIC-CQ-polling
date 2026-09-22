@@ -34,9 +34,9 @@ cudaStream_t copy_stream(uint32_t queue) {
 /// Time one flush in this many. The sampled flush blocks its producer until
 /// the DMA lands, so timing every flush would perturb the run being measured.
 /// Even 1 in 32 does near saturation: at 2 x 200 kpps the stall throttles the
-/// producer, the copy backlog shrinks, and mean latency drops from ~11 us to
-/// ~7 us. At 50 kpps it makes no measurable difference. Hence opt-in
-/// (--copy-timing), so ordinary runs report an unperturbed latency.
+/// producer and shrinks the copy backlog, which changed the measured flush
+/// itself. At 50 kpps it makes no measurable difference. Hence opt-in
+/// (--copy-timing), so ordinary runs are undisturbed.
 constexpr uint32_t kCopySampleEvery = 32;
 
 /// Per-queue flush timing. Strictly one slot per queue (not per stream): each
@@ -54,13 +54,6 @@ struct CopyTiming {
 };
 std::vector<CopyTiming> g_copy_timing;
 
-/// Spins until the host raises `flag`, then records the GPU clock.
-__global__ void gnp_clock_probe(volatile unsigned int* flag, unsigned long long* out) {
-    while (*flag == 0) {
-    }
-    *out = device_now_ns();
-}
-
 // NOTE: H2D flush uses the DMA copy engine (cudaMemcpyAsync), not a compute
 // kernel. A persistent poller would starve a flush kernel on this GPU; the copy
 // engine runs concurrently with the SM poll loop.
@@ -68,8 +61,8 @@ __global__ void gnp_clock_probe(volatile unsigned int* flag, unsigned long long*
 // Copy streams, measured on a GTX 1650 (16 SMs, 12 host threads):
 //  * One stream shared by every queue serialises all producers' flushes behind
 //    each other: 8 queues x 100 kpps delivered ~0.1 Mpps total.
-//  * One stream per queue fixes that, and up to 32 queues it gives the best
-//    latency (32 queues x 25 kpps: 16 us mean vs 27-178 us with 2-16 shared).
+//  * One stream per queue fixes that, and stayed the best arrangement up to
+//    32 queues when measured against 2-16 shared streams.
 //  * Streams must exist before the persistent pollers launch. Per-thread
 //    streams (cudaStreamPerThread), which the driver creates lazily on first
 //    use - i.e. mid-run, from producer threads - were unreliable: at 32-128
@@ -213,43 +206,6 @@ void* backend_alloc_host(size_t bytes) {
 
 void backend_free_host(void* p) {
     if (p) ::operator delete(p, std::align_val_t(64));
-}
-
-int64_t backend_clock_offset_ns() {
-    constexpr int kSamples = 16;
-
-    volatile unsigned int* flag = nullptr;
-    unsigned long long* gpu_ns = nullptr;
-    GNP_CUDA_CHECK(cudaHostAlloc((void**)&flag, sizeof(unsigned int), cudaHostAllocMapped));
-    GNP_CUDA_CHECK(cudaHostAlloc((void**)&gpu_ns, sizeof(unsigned long long), cudaHostAllocMapped));
-
-    int64_t best_offset = 0;
-    uint64_t best_window = ~0ull;
-
-    for (int i = 0; i < kSamples; ++i) {
-        *flag = 0;
-        *gpu_ns = 0;
-        gnp_clock_probe<<<1, 1>>>(flag, gpu_ns);
-        GNP_CUDA_CHECK(cudaGetLastError());
-
-        for (volatile int spin = 0; spin < 200000; ++spin) {
-        }
-
-        const uint64_t t0 = host_now_ns();
-        *flag = 1;
-        GNP_CUDA_CHECK(cudaDeviceSynchronize());
-        const uint64_t t1 = host_now_ns();
-
-        const uint64_t window = t1 - t0;
-        if (window < best_window) {
-            best_window = window;
-            best_offset = static_cast<int64_t>(t0 + window / 2) - static_cast<int64_t>(*gpu_ns);
-        }
-    }
-
-    cudaFreeHost((void*)flag);
-    cudaFreeHost(gpu_ns);
-    return best_offset;
 }
 
 }  // namespace gnp

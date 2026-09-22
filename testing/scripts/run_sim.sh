@@ -19,14 +19,14 @@ run() {
     local out
     out="$("$BIN" "$@" 2>&1)"
 
-    local published observed gaps
+    local published observed gaps rate
     published=$(awk '/descriptors published/ {print $3}' <<<"$out")
     observed=$(awk  '/packets observed/      {print $3}' <<<"$out")
     gaps=$(awk      '/packet-id gaps/        {print $3}' <<<"$out")
-    mean=$(awk      '/^  mean/               {print $2}' <<<"$out")
+    rate=$(awk      '/achieved rate/         {print $3}' <<<"$out")
 
     if [[ "$published" == "$observed" && "$gaps" == "0" ]]; then
-        printf 'ok    %-34s %10s pkts  mean %8s us\n' "$desc" "$observed" "$mean"
+        printf 'ok    %-34s %10s pkts  %8s Mpps\n' "$desc" "$observed" "$rate"
     else
         printf 'FAIL  %-34s published=%s observed=%s gaps=%s\n' \
                "$desc" "$published" "$observed" "$gaps"

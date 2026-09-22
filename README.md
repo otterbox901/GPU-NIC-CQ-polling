@@ -15,7 +15,7 @@ placeholder today). The main thread allocates, launches, sleeps and reports.
 |---|---|
 | **this file** | what it is, how to build it, how to run it on a NIC |
 | [`testing/README.md`](testing/README.md) | unit tests, the simulated NIC, pcap replay, benchmarks |
-| [`docs/README.md`](docs/README.md) | measured results, latency analysis, and an index of the design docs |
+| [`docs/README.md`](docs/README.md) | measured results and an index of the design docs |
 | [`docs/design.md`](docs/design.md) | the protocol and the reasoning behind every design choice |
 
 ```mermaid
@@ -211,7 +211,7 @@ sudo ./build/prod/gnp --iface enp1s0 --port 9000 --duration 30000
 | `--duration MS` | how long to capture | 2000 |
 | `--backoff NS` | relax the poll loop when idle, `0` = pure spin | 0 |
 | `--copy-timing` | time 1 in 32 H2D flushes (CUDA) | off |
-| `--verbose` | device, allocation and clock-offset details | off |
+| `--verbose` | device and allocation details | off |
 
 - **Privileges.** Loading XDP and opening AF_XDP sockets needs root. Instead of
   `sudo` you can grant capabilities once:
@@ -263,8 +263,8 @@ GNP_HD GNP_FORCEINLINE void on_packet(const CompletionDesc& desc, const uint8_t*
 ```
 
 Both pollers call it once per packet, in ring order, right after the descriptor
-is observed. `desc` carries `byte_len`, `packet_id`, `post_ns` and
-`payload_offset`. `payload` points at the UDP payload on the CPU poller. It is
+is observed. `desc` carries `byte_len`, `packet_id`, `post_ns` (the host clock at
+publish) and `payload_offset`. `payload` points at the UDP payload on the CPU poller. It is
 `nullptr` on the CUDA poller, because the payload arena is host memory the
 kernel can't read. A GPU-resident arena is a listed next step in
 [`docs/design.md`](docs/design.md#next-steps-roughly-in-order).
@@ -296,7 +296,7 @@ src/host/
   metrics.cpp         aggregation and end-of-run summary
 src/gpu/
   poll_kernel.cu      the persistent pollers (<<<queues, 1>>>) and residency limit
-  utils.cu            device probe, shared allocation, copy streams, clock calibration
+  utils.cu            device probe, shared allocation, copy streams, H2D flush
   poll_cpu.cpp        CPU fallback (one thread per queue), built only when nvcc is missing
 cmake/
   gnp_cuda.cmake      finds a working nvcc + host compiler pair

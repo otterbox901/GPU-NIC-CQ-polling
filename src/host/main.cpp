@@ -92,7 +92,6 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 0;
     }
-
 #if !defined(GNP_WITH_XDP)
     std::fprintf(stderr,
                  "[gnp] built without AF_XDP support (libxdp, libbpf or clang missing at "
@@ -121,7 +120,7 @@ int main(int argc, char** argv) {
     // 1. The poller goes first, so it is already spinning when packets arrive.
     const gnp::PollQueue poll_queue = qs.poll_queue();
     const uint8_t* arena = qs.arena;
-    if (!gnp::backend_launch_poller(&poll_queue, &arena, 1, session.clock_offset_ns, cfg)) {
+    if (!gnp::backend_launch_poller(&poll_queue, &arena, 1, cfg)) {
         gnp::session_destroy(session);
         return 1;
     }
@@ -154,8 +153,7 @@ int main(int argc, char** argv) {
     const bool ok = gnp::backend_wait_poller();
 
     const gnp::PollStats poll_stats = *qs.stats;
-    gnp::report(cfg, &poll_stats, &ingest_stats, 1, gnp::backend_name(), "AF_XDP ingest",
-                session.clock_offset_ns);
+    gnp::report(cfg, &poll_stats, &ingest_stats, 1, gnp::backend_name(), "AF_XDP ingest");
     gnp::session_destroy(session);
     return ok ? 0 : 1;
 #endif

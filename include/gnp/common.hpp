@@ -23,9 +23,9 @@ namespace gnp {
 
 /// Monotonic clock in nanoseconds (std::chrono::steady_clock).
 ///
-/// This is the single time base for the whole program. The producer stamps
-/// every descriptor with it, and device-side timestamps are translated into it
-/// using backend_clock_offset_ns(), so arrival latency is directly comparable.
+/// The host's time base: the producer stamps every descriptor's post_ns with it,
+/// and the run's own timing uses it. It is not comparable with the GPU's
+/// %globaltimer; see docs/design.md.
 uint64_t host_now_ns();
 
 /// Everything the user can tune from the command line.
@@ -63,9 +63,10 @@ namespace gnp {
 
 /// GPU-side nanosecond counter.
 ///
-/// %globaltimer is a free-running ns counter shared by all SMs. It does NOT
-/// share an epoch with host_now_ns(), which is why the kernel is handed a
-/// precomputed offset (see backend_clock_offset_ns()).
+/// %globaltimer is a free-running ns counter shared by all SMs. It shares
+/// neither an epoch nor a reliable rate with host_now_ns(), so it is used only
+/// for device-side intervals (how long the poller ran, when to retire), never
+/// compared against a host timestamp.
 __device__ __forceinline__ uint64_t device_now_ns() {
     uint64_t t;
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));

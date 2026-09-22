@@ -75,10 +75,6 @@ void  backend_free_host(void* p);
 /// Short string describing the active shared-memory strategy (for --verbose).
 const char* backend_memory_strategy();
 
-/// Nanoseconds to add to a device timestamp to express it on the host_now_ns()
-/// epoch. Zero for the CPU fallback.
-int64_t backend_clock_offset_ns();
-
 /// Most queues that can be polled at once. Call after backend_init().
 ///
 /// CUDA: the poller is persistent, so every block must be resident at the same
@@ -92,7 +88,7 @@ uint32_t backend_max_queues();
 /// `arenas[q]` is queue q's payload arena, handed to on_packet() by the CPU
 /// poller. Kept out of PollQueue because it is host memory the kernel ignores.
 bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* arenas,
-                           uint32_t n_queues, int64_t clock_offset_ns, const RunConfig& cfg);
+                           uint32_t n_queues, const RunConfig& cfg);
 
 /// Wait for every poller to retire.
 bool backend_wait_poller();
@@ -116,7 +112,6 @@ struct QueueSession {
 
 struct Session {
     std::vector<QueueSession> queues;     ///< RunConfig::queues entries
-    int64_t clock_offset_ns = 0;          ///< one device clock, so one calibration
 };
 
 bool session_create(const RunConfig& cfg, Session& out);

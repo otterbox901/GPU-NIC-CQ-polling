@@ -1,10 +1,16 @@
-ok    100 kpps, ring 1024                    100001 pkts  mean    0.301 us
-ok    1 Mpps, ring 1024                     1000051 pkts  mean    0.446 us
-ok    unpaced, ring 1024                   12087036 pkts  mean    4.666 us
-ok    unpaced, ring 64                     13238059 pkts  mean    0.136 us
-ok    bursty, 16 per burst                   500032 pkts  mean    0.606 us
-ok    fixed 200k packets                     200000 pkts  mean    6.071 us
-ok    jumbo payload 9000 B                   200017 pkts  mean    0.238 us
-ok    near-idle, 1 pps                            1 pkts  mean    0.127 us
+ok    100 kpps, ring 1024                    100009 pkts     0.100 Mpps
+ok    1 Mpps, ring 1024                     1000082 pkts     1.000 Mpps
+ok    unpaced, ring 1024                   20619957 pkts    20.618 Mpps
+ok    unpaced, ring 64                     20199341 pkts    20.199 Mpps
+ok    bursty, 16 per burst                   500048 pkts     0.500 Mpps
+ok    fixed 200k packets                     200000 pkts    19.007 Mpps
+ok    jumbo payload 9000 B                   200017 pkts     0.200 Mpps
+ok    near-idle, 1 pps                            1 pkts     0.000 Mpps
+ok    2 queues, 100 kpps each                200018 pkts     0.200 Mpps
+ok    4 queues, 100 kpps each                400071 pkts     0.400 Mpps
+ok    4 queues, unpaced, ring 64           44880394 pkts    44.871 Mpps
+ok    4 queues, bursty                       200064 pkts     0.200 Mpps
+ok    3 queues, fixed 50k each               150000 pkts    36.390 Mpps
+ok    over-limit --queues rejected      
 
 sweep passed
