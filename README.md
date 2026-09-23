@@ -29,9 +29,62 @@ one with measured results.
 | [`docs/README.md`](docs/README.md) | measured results and an index of the design docs |
 | [`docs/design.md`](docs/design.md) | the protocol and the reasoning behind every design choice |
 
+## How a packet gets through
+
+### GPU-direct: `gnp_gpunetio`
+
+Nothing in the shaded host box touches a packet. The CPU appears twice — once to
+build the flow rule and launch the kernel, once to read the counters afterwards.
+
 ```mermaid
 flowchart LR
-    subgraph NIC["NIC"]
+    WIRE(["wire"])
+    subgraph NIC["NIC (ConnectX-6 Dx or newer)"]
+        STEER["hardware steering<br/>root pipe: UDP dport == --port<br/>-> RSS pipe over N queues"]
+    end
+    subgraph GPU["GPU"]
+        BUF[("packet buffer<br/>(VRAM, cyclic)")]
+        CQ[("completion queue<br/>(VRAM)")]
+        KERNEL["persistent kernel, one block per queue<br/>doca_gpu_dev_eth_rxq_recv()<br/>512 threads split each batch<br/>on_packet(frame bytes, len)"]
+    end
+    subgraph HOST["Host CPU"]
+        MAIN["main thread<br/>build pipes, launch, sleep, report"]
+    end
+    WIRE --> STEER
+    STEER -- "DMA: raw Ethernet frames" --> BUF
+    STEER -- "DMA: completions" --> CQ
+    STEER -. "miss: everything else<br/>reaches the normal stack" .-> STACK["kernel network stack"]
+    CQ -- "read in place,<br/>no descriptor copy" --> KERNEL
+    BUF -- "get_pkt_addr():<br/>a pointer into VRAM" --> KERNEL
+    KERNEL -. "GDAKI: the GPU rings the<br/>doorbell and reposts buffers" .-> STEER
+    MAIN -. "launch once,<br/>exit flag at the end" .-> KERNEL
+```
+
+1. **Steer in hardware.** A DOCA Flow root pipe matches IPv4/UDP on `--port`
+   and forwards to an RSS pipe spread over the receive queues. Unmatched
+   traffic misses the pipe and reaches the kernel stack as usual, so the host
+   keeps its network.
+2. **Land in VRAM.** Each queue's packet buffer is `doca_gpu_mem_alloc`'d in
+   device memory and handed to the NIC through a dmabuf mapping, so the NIC
+   DMAs whole Ethernet frames straight into GPU memory. No UMEM, no arena, no
+   copy.
+3. **Receive from the SM.** The receive queue's data path lives on the GPU
+   (`doca_ctx_set_datapath_on_gpu`), so the persistent kernel calls
+   `doca_gpu_dev_eth_rxq_recv()` itself: it reads the NIC's completions out of
+   VRAM, rings the doorbell, and reposts buffers. The CPU is not involved.
+4. **Process.** Every thread in the block takes a slice of the returned batch,
+   resolves each packet to a VRAM address, and calls `on_packet()` with the
+   real bytes.
+5. **Stop and report.** The host sets an exit flag in `CPU_GPU` memory, the
+   kernel drains and returns, and the counters it wrote are printed.
+
+Delivery across a batch is unordered, so this path reports no `packet-id gaps`.
+
+### AF_XDP + completion ring: `gnp`
+
+```mermaid
+flowchart LR
+    subgraph NIC["NIC (any)"]
         XDP["XDP program<br/>udp_redirect.bpf.c<br/>UDP dport == --port ?"]
     end
     subgraph HOST["Host CPU"]
@@ -46,7 +99,7 @@ flowchart LR
     end
     subgraph GPU["GPU"]
         CQ[("device completion ring<br/>(GDDR)")]
-        POLL["persistent poller<br/>on_packet(desc, payload)"]
+        POLL["persistent poller, one thread per queue<br/>on_packet(nullptr, len)"]
         CQ -- "spin: one load +<br/>owner-bit compare" --> POLL
     end
     XDP -- "XDP_REDIRECT<br/>(bypasses the network stack)" --> UMEM
@@ -55,8 +108,6 @@ flowchart LR
     POLL -. "consumed watermark<br/>(back-pressure)" .-> RX
     MAIN -. "launch once,<br/>stop at the end" .-> POLL
 ```
-
-## How a packet gets through
 
 1. **Attach.** `gnp` loads `udp_redirect.bpf.o`, writes `--port` and
    `--nic-queue` into its `config_map`, and attaches it to `--iface`. It uses
@@ -79,7 +130,8 @@ flowchart LR
    pinned staging into the device ring, owner bit last per slot.
 6. **Poll.** The persistent kernel spins on one load plus an owner-bit compare.
    When a descriptor is ready it reads the fields, calls
-   `on_packet(desc, payload)`, updates the counters, and publishes its consumed
+   `on_packet()` with the length but a null data pointer (the payload is in
+   host memory it cannot read), updates the counters, and publishes its consumed
    watermark every 64 packets so the RX thread knows which slots are free.
 7. **Stop and report.** After `--duration`, the RX thread is joined, the XDP
    program is detached, and the socket is closed. The XDP program's and the
