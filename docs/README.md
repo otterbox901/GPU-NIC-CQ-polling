@@ -6,7 +6,7 @@
 | [`design.md`](design.md) | the owner-bit protocol, publication ordering, memory placement, the AF_XDP producer, multi-queue, and the next steps |
 | this file | measured results and how to read the run summary |
 | [`../testing/README.md`](../testing/README.md) | how every result here was produced, and how to reproduce it |
-| [`bench/`](bench/) | raw benchmark data (`results.csv`) and the machine it came from (`machine.txt`) |
+| [`bench/`](bench/) | the machine the measurements came from (`machine.txt`) |
 | [`img/`](img/) | the charts below, light and dark |
 
 ## Status
@@ -14,10 +14,11 @@
 | component | state | evidence |
 |---|---|---|
 | ring protocol | verified | `test_ring` |
-| GPU and CPU pollers | verified, 1–N queues | `run_sim.sh` sweep, benchmarks below |
+| ring poller (CUDA) | verified, 1–N queues | `run_sim.sh` sweep, benchmarks below |
 | AF_XDP ingest, generic XDP on veth | verified | 10,000/10,000 packets, 0 gaps ([reference run](../testing/README.md#3-real-ingest-path-pcap-replay-over-veth)) |
 | AF_XDP ingest, generic XDP on a physical NIC | verified | 9,999/9,999 packets, 0 gaps, USB Ethernet ([procedure](../testing/README.md#4-real-nic-tcpreplay-from-a-second-machine)) |
 | native (driver) XDP on a physical NIC | **not yet tested** | needs a native-XDP NIC ([checklist](../README.md#run-on-a-nic)) |
+| GPU-direct receive (DOCA GPUNetIO) | **built, never run** | compiles and links against DOCA 3.5 and refuses cleanly with no NIC; needs a ConnectX-6 Dx or newer ([how](../README.md#building-the-gpu-direct-path)) |
 | publish -> observe latency | **not measured** | needs a host/GPU time base this hardware does not provide ([why](#why-latency-is-not-reported)) |
 | `on_packet()` | placeholder, empty | [`packet_handler.hpp`](../include/gnp/packet_handler.hpp) |
 
@@ -28,10 +29,18 @@ generates arrivals at a precise rate on any machine, so the two pollers can be
 compared without network noise. The poll loop and the ring are the same code
 `gnp` runs on real traffic.
 
-Both backends run the **same poll loop over the same owner-bit ring**. They
-differ only in where the loop runs and which memory it reads:
+> **Historical.** These numbers compare the CUDA ring poller against a CPU
+> fallback poller that has since been removed, when the project moved to
+> GPU-direct receive. They are kept because they are the measured result that
+> justified moving polling off the CPU, but they cannot be reproduced from this
+> tree: the CPU backend is gone, and the raw CSV they came from was overwritten
+> by a later contended run and has been dropped rather than left contradicting
+> the charts. `testing/scripts/bench.py` now measures the GPU path only.
 
-| | GPU poller ([`poll_kernel.cu`](../src/gpu/poll_kernel.cu)) | CPU fallback ([`poll_cpu.cpp`](../src/gpu/poll_cpu.cpp)) |
+Both backends ran the **same poll loop over the same owner-bit ring**. They
+differed only in where the loop ran and which memory it read:
+
+| | GPU poller ([`poll_kernel.cu`](../src/gpu/poll_kernel.cu)) | CPU fallback (removed) |
 |---|---|---|
 | poll loop runs on | an SM: one single-thread block per queue | a host core: one spinning thread per queue |
 | ring it reads | device memory, filled by DMA over PCIe | host memory, written directly by the producer |
@@ -66,7 +75,8 @@ differ only in where the loop runs and which memory it reads:
 
 Setup: GTX 1650 (sm_75, 16 SMs) and an i7-9750H (12 hardware threads). Each
 point is the median of 5 runs. Every run delivered every packet with zero gaps.
-The raw data is in [`bench/results.csv`](bench/results.csv).
+The raw CSV behind these figures was not retained (see the note above), so the
+charts and the table below are the record.
 
 <details>
 <summary>Data table</summary>

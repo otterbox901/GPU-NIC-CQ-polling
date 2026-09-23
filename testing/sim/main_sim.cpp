@@ -24,7 +24,7 @@ namespace {
 
 void usage(const char* argv0) {
     std::printf("usage: %s [options]\n", argv0);
-    gnp::print_common_usage();
+    gnp::print_common_usage(gnp::FlagScope::kRing);
     std::printf(
         "  --pps R           injection rate PER QUEUE, 0 = unpaced (default 100000)\n"
         "  --packets N       stop after N packets per queue, 0 = until duration (default 0)\n"
@@ -33,7 +33,7 @@ void usage(const char* argv0) {
 
 bool parse_args(int argc, char** argv, gnp::RunConfig& cfg, bool& want_help) {
     for (int i = 1; i < argc; ++i) {
-        switch (gnp::parse_common_flag(argc, argv, i, cfg)) {
+        switch (gnp::parse_common_flag(argc, argv, i, cfg, gnp::FlagScope::kRing)) {
             case gnp::FlagResult::kOk: continue;
             case gnp::FlagResult::kBad: return false;
             case gnp::FlagResult::kHelp: want_help = true; return true;

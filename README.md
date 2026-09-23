@@ -3,17 +3,28 @@
 Kernel-bypass UDP receive with completion-queue polling moved off the CPU and
 onto GPU SMs.
 
-Packets arrive through **AF_XDP**. An eBPF/XDP program on the NIC redirects one
-UDP port into a userspace socket before the kernel network stack ever sees the
-frame. An RX thread copies each UDP payload into a payload arena and publishes
-a 32-byte `CompletionDesc` into a `CompletionRing` that lives in GPU memory. A
-persistent CUDA kernel polls that ring from an SM and hands every packet to
-`gnp::on_packet()`, the function where real processing goes (it is an empty
-placeholder today). The main thread allocates, launches, sleeps and reports.
+There are two receive paths, and they differ in how far the CPU is removed
+from the data plane.
+
+**`gnp_gpunetio` - GPU-direct (DOCA GPUNetIO / GDAKI).** The NIC's own hardware
+steering sends one UDP port straight into a buffer in GPU memory, and a
+persistent CUDA kernel reads those frames there. No kernel network stack, no
+userspace copy, no CPU thread on the data path at all. `gnp::on_packet()` gets
+real packet bytes. Needs a ConnectX-6 Dx or newer (or BlueField-2/3), so it is
+**built and compile-verified but not yet run** - see
+[`docs/README.md`](docs/README.md#status).
+
+**`gnp` - AF_XDP + completion ring.** An eBPF/XDP program redirects one UDP
+port into a userspace socket before the kernel network stack sees the frame. An
+RX thread copies each payload into a host arena and publishes a 32-byte
+`CompletionDesc` into a ring that is DMA'd to GPU memory, where a persistent
+CUDA kernel polls it. The CPU still parses and copies, and the kernel sees only
+descriptors - never packet bytes. This path runs on ordinary NICs and is the
+one with measured results.
 
 | document | contents |
 |---|---|
-| **this file** | what it is, how to build it, how to run it on a NIC |
+| **this file** | what the two paths are, how to build them, how to run on a NIC |
 | [`testing/README.md`](testing/README.md) | unit tests, the simulated NIC, pcap replay, benchmarks |
 | [`docs/README.md`](docs/README.md) | measured results and an index of the design docs |
 | [`docs/design.md`](docs/design.md) | the protocol and the reasoning behind every design choice |
@@ -90,9 +101,10 @@ flowchart LR
 sudo dnf install cmake gcc-c++ pkgconf clang llvm libbpf-devel libxdp-devel kernel-headers
 ```
 
-Without CUDA, the poller runs on a host thread instead of an SM. Without
-libbpf, libxdp or clang, `gnp` still builds, but it has no packet source and
-says so at startup.
+**CUDA is required**: every receive path polls from an SM, so configure fails
+without a working `nvcc`. Without libbpf, libxdp or clang, `gnp` still builds
+but has no packet source and says so at startup. The GPU-direct path needs the
+DOCA SDK as well; see [Building the GPU-direct path](#building-the-gpu-direct-path).
 
 ### 2. Configure and build
 
@@ -108,11 +120,10 @@ The configure log states what was found. Check this line:
 -- gnp: cuda=ON xdp=ON testing=OFF
 ```
 
-- `cuda=ON`: `nvcc` and a host compiler it accepts were found, so the poller is
-  the persistent kernel (`src/gpu/poll_kernel.cu`). With `OFF`, it is
-  `src/gpu/poll_cpu.cpp`.
 - `xdp=ON`: the AF_XDP ingest is compiled in. With `OFF`, the warning above it
   names what's missing.
+- `gpunetio=ON`: the GPU-direct path is compiled in. It is `OFF` unless the
+  DOCA SDK is present, which on most machines means building in the container.
 - `testing=OFF`: nothing from `testing/` is compiled or linked.
 
 The output is two files:
@@ -128,14 +139,29 @@ Keep them together, or pass `--bpf-obj PATH`.
 
 | preset | builds | use it for |
 |---|---|---|
-| `prod` | `gnp` | real traffic |
+| `prod` | `gnp` | real traffic on the AF_XDP path |
 | `dev` | `gnp`, `gnp_sim`, `test_ring` | development, benchmarks, CI ([testing/README.md](testing/README.md)) |
-| `dev-cpu` | same as `dev`, CPU poller forced | fast protocol iteration |
 | `debug` | same as `dev`, `-O0 -g` | debugging |
+| `gpunetio` | `gnp_gpunetio` | the GPU-direct path; run it through `scripts/doca-build.sh` |
 
-The underlying options are `GNP_ENABLE_CUDA` (ON), `GNP_ENABLE_XDP` (ON) and
-`GNP_BUILD_TESTING` (OFF). The first two auto-detect, and turning one OFF
+The underlying options are `GNP_ENABLE_XDP` (ON), `GNP_ENABLE_GPUNETIO` (ON)
+and `GNP_BUILD_TESTING` (OFF). The first two auto-detect, and turning one OFF
 skips the detection.
+
+### Building the GPU-direct path
+
+DOCA ships for Ubuntu, RHEL/Rocky, Debian, SLES, Oracle, Azure and Amazon Linux
+- not Fedora - so the build runs inside NVIDIA's DOCA container, which already
+carries DOCA 3.5 and CUDA 13:
+
+```bash
+scripts/doca-build.sh          # configure + build -> build/gpunetio/gnp_gpunetio
+scripts/doca-build.sh --shell  # a shell in the same environment
+```
+
+The container exists to compile and link against genuine DOCA headers. Running
+the result needs a ConnectX NIC, which the container cannot conjure; without
+one the binary exits with `no DOCA device at PCI ...`.
 
 ### Installing CUDA (Fedora)
 
@@ -256,18 +282,24 @@ summary fields are explained in
 [`include/gnp/packet_handler.hpp`](include/gnp/packet_handler.hpp):
 
 ```cpp
-GNP_HD GNP_FORCEINLINE void on_packet(const CompletionDesc& desc, const uint8_t* payload) {
-    (void)desc;
-    (void)payload;
+struct PacketView {
+    const uint8_t* data;  // nullptr when the poller cannot reach the bytes
+    uint32_t       len;
+};
+
+GNP_HD GNP_FORCEINLINE void on_packet(const PacketView& pkt) {
+    (void)pkt;
 }
 ```
 
-Both pollers call it once per packet, in ring order, right after the descriptor
-is observed. `desc` carries `byte_len`, `packet_id`, `post_ns` (the host clock at
-publish) and `payload_offset`. `payload` points at the UDP payload on the CPU poller. It is
-`nullptr` on the CUDA poller, because the payload arena is host memory the
-kernel can't read. A GPU-resident arena is a listed next step in
-[`docs/design.md`](docs/design.md#next-steps-roughly-in-order).
+Both paths call it once per packet, right after the packet is observed. What
+`data` points at is the difference between them:
+
+- **GPU-direct path:** the full Ethernet frame, in GPU memory, put there by the
+  NIC. This is the only path where the hook can do real work.
+- **AF_XDP path:** always `nullptr`. That path stages UDP payloads in a host
+  arena and DMAs only descriptors to the device, so the kernel knows a packet
+  arrived and how long it was, but cannot read it.
 
 It runs on the poll loop's critical path, so whatever you put there sets the
 per-packet budget. Slow work should be handed off (for example, to the rest
@@ -276,31 +308,38 @@ of the warp on the GPU) rather than done inline.
 ## Layout
 
 ```
-include/gnp/
+include/gnp/            shared by both paths unless noted
   common.hpp          RunConfig, clocks, GNP_HD, GNP_FORCEINLINE, GNP_CUDA_CHECK
-  ring.hpp            CompletionDesc / CompletionRing / RingControl, owner-bit
-                      math, IngestStats, ring_publish()
-  packet_handler.hpp  on_packet(): the per-packet processing hook (empty)
-  xdp_ingest.hpp      AF_XDP ingest lifecycle
-  cli.hpp             flags shared by gnp and gnp_sim
+  packet_handler.hpp  PacketView and on_packet(): the processing hook (empty)
+  cli.hpp             flag parsing, scoped per path
   metrics.hpp         PollStats, report()
-  gpu_poll.hpp        backend interface, PollQueue, Session / QueueSession
-src/bpf/
-  udp_redirect.bpf.c  XDP program: one UDP port -> AF_XDP socket, rest XDP_PASS
-src/host/
+  ring.hpp            AF_XDP path: CompletionDesc / CompletionRing /
+                      RingControl, owner-bit math, IngestStats, ring_publish()
+  xdp_ingest.hpp      AF_XDP path: ingest lifecycle
+  gpu_poll.hpp        AF_XDP path: ring backend, PollQueue, Session
+  gpunetio.hpp        GPU-direct path: session lifecycle
+src/host/             the AF_XDP path plus the shared core
   main.cpp            gnp: attach, poll, capture, report
   xdp_ingest.cpp      BPF load/attach, UMEM and socket, RX thread
   ring.cpp            ring_publish(): the owner-bit publish protocol
-  cli.cpp             shared flag parsing
-  setup.cpp           allocation, teardown, queue-limit check, host_now_ns()
+  setup.cpp           allocation, teardown, poller retire, host_now_ns()
+  cli.cpp             shared flag table
   metrics.cpp         aggregation and end-of-run summary
 src/gpu/
-  poll_kernel.cu      the persistent pollers (<<<queues, 1>>>) and residency limit
+  poll_kernel.cu      the persistent ring pollers (<<<queues, 1>>>)
   utils.cu            device probe, shared allocation, copy streams, H2D flush
-  poll_cpu.cpp        CPU fallback (one thread per queue), built only when nvcc is missing
+src/bpf/
+  udp_redirect.bpf.c  XDP program: one UDP port -> AF_XDP socket, rest XDP_PASS
+src/gpunetio/         the GPU-direct path; nothing below on_packet() is shared
+  main_gpunetio.cpp   gnp_gpunetio: start, sleep, report
+  setup.cpp           DOCA device, VRAM packet buffer, rxq on GPU, flow steering
+  receive_kernel.cu   the persistent receive loop (one block per queue)
 cmake/
-  gnp_cuda.cmake      finds a working nvcc + host compiler pair
+  gnp_cuda.cmake      finds a working nvcc + host compiler pair (required)
   gnp_xdp.cmake       finds libbpf, libxdp and clang
+  gnp_doca.cmake      finds the DOCA SDK
+scripts/
+  doca-build.sh       build the GPU-direct path in NVIDIA's DOCA container
 testing/              simulator, unit tests, scripts; see testing/README.md
 docs/                 results and design; see docs/README.md
 ```

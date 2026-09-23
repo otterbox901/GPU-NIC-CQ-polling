@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark the GPU poller against the CPU fallback and record the results.
+"""Benchmark the GPU ring poller across queue counts and record the results.
 
 Runs the same workloads on both builds and writes one CSV row per run:
 
@@ -14,8 +14,9 @@ threads) is "other". The GPU poller runs on the GPU, so on that backend the
 polling cost shows up as poll + other = ~0.
 
 Usage:
-  testing/scripts/bench.py [--gpu build/dev/testing/gnp_sim] [--cpu build/dev-cpu/testing/gnp_sim] [--runs 5]
-Then render the charts with testing/scripts/plot_bench.py.
+  testing/scripts/bench.py [--gpu build/dev/testing/gnp_sim] [--runs 5]
+Writes docs/bench/results-gpu.csv. The GPU-vs-CPU comparison in docs/README.md
+is historical: the CPU fallback it compared against has been removed.
 """
 
 import argparse
@@ -142,13 +143,12 @@ def machine_info(gpu_bin):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--gpu", default=str(ROOT / "build/dev/testing/gnp_sim"))
-    ap.add_argument("--cpu", default=str(ROOT / "build/dev-cpu/testing/gnp_sim"))
     ap.add_argument("--runs", type=int, default=5)
     args = ap.parse_args()
 
-    for b in (args.gpu, args.cpu):
+    for b in (args.gpu,):
         if not os.access(b, os.X_OK):
-            sys.exit(f"missing binary: {b} (build the dev and dev-cpu presets first)")
+            sys.exit(f"missing binary: {b} (build the dev preset first)")
 
     # Each CPU-fallback queue costs two spinning threads; stay within the host.
     max_q = min(5, max(1, (os.cpu_count() or 2) // 2 - 1))
@@ -156,18 +156,16 @@ def main():
 
     plan = []
     for q in queue_counts:
-        for backend, binary in (("gpu", args.gpu), ("cpu", args.cpu)):
-            plan.append(("paced", backend, binary, q, 50000, 1024, 2000))
-            plan.append(("unpaced", backend, binary, q, 0, 64, 1000))
+        plan.append(("paced", "gpu", args.gpu, q, 50000, 1024, 2000))
+        plan.append(("unpaced", "gpu", args.gpu, q, 0, 64, 1000))
     # Same as "paced" on the GPU, plus sampled H2D flush timing. Kept separate:
     # the sampling stalls the producer, so the other scenarios run without it.
     for q in queue_counts:
         plan.append(("copy", "gpu", args.gpu, q, 50000, 1024, 2000))
 
-    # plot_bench.py reads this exact path, so it is fixed rather than a flag.
     out_dir = ROOT / "docs/bench"
     out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = out_dir / "results.csv"
+    csv_path = out_dir / "results-gpu.csv"
     bad = 0
     with open(csv_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)

@@ -75,10 +75,10 @@ __global__ void gnp_poll_kernel(const PollQueue* queues, unsigned int n_queues,
             const unsigned int len = descs[slot].byte_len;
             const unsigned int pid = descs[slot].packet_id;
 
-            // The arena is host memory, so the kernel has no payload pointer.
-            const CompletionDesc observed{descs[slot].payload_offset, len, pid,
-                                          descs[slot].post_ns, 0u, st};
-            on_packet(observed, nullptr);
+            // The payload arena is host memory, so there are no bytes to pass:
+            // this path can report arrival and length, nothing more. See
+            // src/gpunetio/ for the path where the hook gets real packets.
+            on_packet(PacketView{nullptr, len});
 
             ++s.packets;
             s.bytes += len;

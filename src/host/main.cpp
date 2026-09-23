@@ -28,13 +28,13 @@ void usage(const char* argv0) {
         "  --nic-queue N     NIC RX queue to bind to (default 0); steer the port there\n"
         "  --skb-mode        force generic XDP: any interface, slower\n"
         "  --bpf-obj PATH    udp_redirect.bpf.o (default: next to this binary)\n");
-    gnp::print_common_usage();
+    gnp::print_common_usage(gnp::FlagScope::kRing);
 }
 
 bool parse_args(int argc, char** argv, gnp::RunConfig& cfg, gnp::XdpConfig& xdp,
                 bool& want_help) {
     for (int i = 1; i < argc; ++i) {
-        switch (gnp::parse_common_flag(argc, argv, i, cfg)) {
+        switch (gnp::parse_common_flag(argc, argv, i, cfg, gnp::FlagScope::kRing)) {
             case gnp::FlagResult::kOk: continue;
             case gnp::FlagResult::kBad: return false;
             case gnp::FlagResult::kHelp: want_help = true; return true;

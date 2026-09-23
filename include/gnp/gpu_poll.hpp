@@ -1,12 +1,15 @@
 #pragma once
 //
-// gnp/gpu_poll.hpp - the polling backend, plus the session that owns its memory.
+// gnp/gpu_poll.hpp - the AF_XDP path's ring backend and the session that owns
+// its memory.
 //
-// Exactly one backend is compiled in:
-//   * src/gpu/poll_kernel.cu + src/gpu/utils.cu  when a CUDA compiler was found
-//   * src/gpu/poll_cpu.cpp                       otherwise
-// Both implement the free functions below, so no host .cpp ever includes a
-// CUDA header.
+// Implemented by src/gpu/poll_kernel.cu + src/gpu/utils.cu, behind free
+// functions so no host .cpp ever includes a CUDA header.
+//
+// This is the descriptor-ring path: a producer stages 32-byte CQEs in host
+// memory and DMAs them to a device-resident ring an SM polls. The GPUNetIO
+// path (src/gpunetio/) shares none of this - there the NIC writes packets
+// straight into GPU memory and DOCA owns the completion queue.
 //
 // Multi-queue: a run has RunConfig::queues independent completion rings. Each
 // ring has its own control block, stats block, producer and poller, and shares
@@ -29,7 +32,7 @@ struct PollQueue {
     PollStats*     stats;
 };
 
-/// "cuda" or "cpu-fallback". Printed in the report.
+/// Backend name for the report, e.g. "cuda".
 const char* backend_name();
 
 /// Select/probe the device. Returns false if the backend is unusable.
@@ -40,22 +43,21 @@ void* backend_alloc_shared(size_t bytes);
 void  backend_free_shared(void* p);
 
 /// Completion ring: host staging (producer) + device-resident CQ (poller).
-/// On the CPU backend both pointers are equal. On CUDA, `host_out` is pinned
-/// staging and `device_out` is cudaMalloc'd GPU memory the SM polls locally.
+/// `host_out` is pinned staging; `device_out` is cudaMalloc'd GPU memory the
+/// SM polls locally.
 bool backend_alloc_ring(size_t bytes, CompletionDesc** host_out, CompletionDesc** device_out);
 void backend_free_ring(CompletionDesc* host, CompletionDesc* device);
 
 /// Create the H2D copy channels for `n_queues` queues. Must run before the
-/// pollers launch. `timing` enables backend_copy_stats() sampling. No-op on the
-/// CPU backend.
+/// pollers launch. `timing` enables backend_copy_stats() sampling.
 bool backend_setup_copy(uint32_t n_queues, bool timing);
 void backend_teardown_copy();
 
 /// Copy `count` completed CQEs of queue `queue` from host staging into its
 /// device ring, starting at monotonic index `start_idx`. Status is published
-/// last per slot so the poller never sees a torn descriptor. No-op when
-/// host == device. Each queue flushes on its own copy stream (shared
-/// round-robin past 32 queues), so producers rarely wait on each other.
+/// last per slot so the poller never sees a torn descriptor. Each queue
+/// flushes on its own copy stream (shared round-robin past 32 queues), so
+/// producers rarely wait on each other.
 void backend_flush_descs(uint32_t queue, CompletionDesc* host, CompletionDesc* device,
                          uint32_t capacity, uint64_t start_idx, uint32_t count);
 
@@ -64,11 +66,12 @@ void backend_flush_descs(uint32_t queue, CompletionDesc* host, CompletionDesc* d
 void backend_flush_wait(uint32_t queue);
 
 /// Fill `out`'s copy_* fields with queue `queue`'s sampled flush timings. Call
-/// from that queue's producer after its last flush. Leaves them zero when
-/// timing is off, and on the CPU backend, which has no copy.
+/// from that queue's producer after its last flush. Left zero when timing is
+/// off.
 void backend_copy_stats(uint32_t queue, IngestStats& out);
 
-/// Host-only allocation (payload arena). Only the CPU poller can read it.
+/// Host-only allocation (payload arena). The kernel cannot read it; see
+/// packet_handler.hpp.
 void* backend_alloc_host(size_t bytes);
 void  backend_free_host(void* p);
 
@@ -77,16 +80,15 @@ const char* backend_memory_strategy();
 
 /// Most queues that can be polled at once. Call after backend_init().
 ///
-/// CUDA: the poller is persistent, so every block must be resident at the same
-/// time or the late ones never start and the run deadlocks. The limit is
+/// The poller is persistent, so every block must be resident at the same time
+/// or the late ones never start and the run deadlocks. The limit is
 /// max-active-blocks-per-SM (from the occupancy API) x SM count.
-/// CPU fallback: threads are preemptible, so this is only a sanity bound.
 uint32_t backend_max_queues();
 
-/// Launch one persistent poller per queue. CUDA: a single <<<n_queues, 1>>>
-/// grid, block b polls queues[b]. CPU: one thread per queue.
-/// `arenas[q]` is queue q's payload arena, handed to on_packet() by the CPU
-/// poller. Kept out of PollQueue because it is host memory the kernel ignores.
+/// Launch one persistent poller per queue: a single <<<n_queues, 1>>> grid,
+/// block b polls queues[b]. `arenas[q]` is queue q's payload arena; it is host
+/// memory the kernel cannot read, so it is kept out of PollQueue and the
+/// poller passes a null PacketView::data.
 bool backend_launch_poller(const PollQueue* queues, const uint8_t* const* arenas,
                            uint32_t n_queues, const RunConfig& cfg);
 
@@ -101,7 +103,7 @@ void backend_shutdown();
 /// control/stats words that different SMs write never share a cache line.
 struct QueueSession {
     CompletionRing ring;                  ///< .descs = device pointer (poller)
-    CompletionDesc* host_descs = nullptr; ///< producer staging (equals ring.descs on CPU)
+    CompletionDesc* host_descs = nullptr; ///< producer staging (pinned host memory)
     RingControl*   ctrl   = nullptr;
     PollStats*     stats  = nullptr;
     uint8_t*       arena  = nullptr;

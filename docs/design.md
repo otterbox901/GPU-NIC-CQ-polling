@@ -22,9 +22,8 @@ producer                    ring (GPU memory)              consumer
 xdp_ingest.cpp        ──►   CompletionRing            ◄──  poll_kernel.cu
 (AF_XDP RX thread)          capacity × 32 B CQE            persistent kernel
                             + RingControl                  1 thread per queue
-testing/sim/          ──►   + payload arena           ◄──  (poll_cpu.cpp when
-sim_inject.cpp (dev)                                        nvcc is absent)
-                                                            └─ on_packet()
+testing/sim/          ──►   + payload arena
+sim_inject.cpp (dev)                                        └─ on_packet()
 
         × N queues (--queues N): each row above is replicated per queue,
           and no queue shares memory, a stream or a thread with another.
@@ -71,7 +70,7 @@ The payoff is that the consumer never needs a producer index. It reads one
 shared counter, no atomics, no host round trip.
 
 `ring_slot`, `ring_expected_owner` and `desc_ready` are `GNP_HD` inline
-functions in `ring.hpp`, so the kernel, the CPU fallback and the unit tests all
+functions in `ring.hpp`, so the kernel and the unit tests both
 run the *same* index math. A protocol bug cannot hide in one copy.
 
 ## Publication ordering
@@ -219,10 +218,9 @@ a real NIC DMAs into the device CQ itself and has no copy streams.
 
 ### Measured (GTX 1650, sm_75, 16 SMs; i7-9750H, 12 threads)
 
-All numbers come from `testing/scripts/bench.py` (raw data in
-[`bench/results.csv`](bench/results.csv)). Each is the median of 5 runs, and
-every run delivered every packet with zero gaps. `testing/scripts/plot_bench.py`
-redraws the README charts from the same file.
+All numbers come from `testing/scripts/bench.py`. Each is the median of 5 runs,
+and every run delivered every packet with zero gaps. The raw CSV was not
+retained; see the note in [`docs/README.md`](README.md#gpu-polling-vs-cpu-polling).
 
 Unpaced, 64-entry rings: throughput scales with the queue count.
 

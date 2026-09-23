@@ -2,7 +2,7 @@
 
 Everything that verifies `gnp` lives here. Nothing in this directory is part of
 the production build: it is compiled only with `GNP_BUILD_TESTING=ON`, which the
-`dev`, `dev-cpu` and `debug` presets set. See the [main README](../README.md)
+`dev` and `debug` presets set. See the [main README](../README.md)
 for building `gnp` itself.
 
 | level | tool | needs | proves |
@@ -11,13 +11,12 @@ for building `gnp` itself.
 | 2. pollers | `gnp_sim` + `run_sim.sh` | a build | the GPU/CPU pollers drain every packet, in order, under load |
 | 3. ingest | `gnp` + veth + `replay_pcap.py` | root, libxdp | XDP → AF_XDP → ring → poller works on real frames |
 | 4. hardware | `gnp` + NIC + a sender | root, a second machine | the same, on a physical NIC |
-| perf | `bench.py` + `plot_bench.py` | CUDA and CPU builds | host CPU, throughput and H2D flush ([results](../docs/README.md)) |
+| perf | `bench.py` | the `dev` build | throughput and H2D flush across queue counts ([results](../docs/README.md)) |
 
 ## Build
 
 ```bash
-cmake --preset dev     && cmake --build --preset dev       # CUDA poller (if nvcc found)
-cmake --preset dev-cpu && cmake --build --preset dev-cpu   # CPU poller
+cmake --preset dev && cmake --build --preset dev
 ```
 
 This produces, per preset:
@@ -31,7 +30,7 @@ build/<preset>/testing/test_ring     ring-protocol unit tests
 ## 1. Unit tests
 
 ```bash
-ctest --preset dev        # or dev-cpu
+ctest --preset dev        # or debug
 ```
 
 `unit/test_ring.cpp` drives `gnp::ring_publish()`, the same publish function the
@@ -55,7 +54,6 @@ ingest existed.
 
 ```bash
 testing/scripts/run_sim.sh ./build/dev/testing/gnp_sim       # ~20 s
-testing/scripts/run_sim.sh ./build/dev-cpu/testing/gnp_sim
 ```
 
 The sweep covers paced, unpaced, bursty, jumbo, near-idle, fixed-count and
@@ -196,12 +194,11 @@ sudo tcpreplay --intf1=<sender iface> --pps=10000 udp-rw.pcap
 ## Benchmarks
 
 ```bash
-testing/scripts/bench.py        # ~5 min; runs both dev builds, writes docs/bench/results.csv
-testing/scripts/plot_bench.py   # docs/bench/results.csv -> docs/img/*.svg, prints the tables
+testing/scripts/bench.py        # ~3 min; writes docs/bench/results-gpu.csv
 ```
 
-`bench.py` runs the `gnp_sim` binaries from `build/dev` and `build/dev-cpu`
-(change them with `--gpu` / `--cpu`). It records host CPU per thread from
+`bench.py` runs the `gnp_sim` binary from `build/dev` (change it with
+`--gpu`). It records host CPU per thread from
 `/proc`, and uses the `gnp-prod-*` thread names to leave out the simulated
 producers. Copy timing (`--copy-timing`) runs only in its own `copy` scenario,
 because it disturbs heavily loaded runs. The results and their analysis are in
@@ -221,8 +218,7 @@ unit/
 scripts/
   run_sim.sh            correctness sweep over gnp_sim
   replay_pcap.py        make a UDP pcap / replay one onto an interface
-  bench.py              GPU vs CPU benchmark -> docs/bench/results.csv
-  plot_bench.py         results.csv -> docs/img/*.svg (stdlib only)
+  bench.py              GPU ring-poller benchmark -> docs/bench/results-gpu.csv
 results/
   cpu_sweep.txt         saved run_sim.sh output, CPU poller
   gpu_sweep.txt         saved run_sim.sh output, CUDA poller

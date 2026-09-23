@@ -11,38 +11,40 @@
       "name": "prod",
       "inherits": "base",
       "displayName": "Production",
-      "description": "Only gnp: AF_XDP ingest + CUDA poller (CPU poller if nvcc is missing). No testing code."
+      "description": "Only gnp: AF_XDP ingest + the CUDA ring poller. No testing code."
     },
     {
       "name": "dev",
       "inherits": "base",
-      "displayName": "Development (auto-detect CUDA)",
+      "displayName": "Development",
       "description": "gnp plus testing/: gnp_sim, test_ring and ctest.",
       "cacheVariables": { "GNP_BUILD_TESTING": "ON" }
-    },
-    {
-      "name": "dev-cpu",
-      "inherits": "dev",
-      "displayName": "Development (force CPU poller)",
-      "description": "Ignores any installed CUDA toolkit. Useful for fast protocol iteration.",
-      "cacheVariables": { "GNP_ENABLE_CUDA": "OFF" }
     },
     {
       "name": "debug",
       "inherits": "dev",
       "displayName": "Debug",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "gpunetio",
+      "inherits": "base",
+      "displayName": "GPU-direct receive (DOCA container)",
+      "description": "Builds gnp_gpunetio. Run via scripts/doca-build.sh: needs the DOCA SDK, which has no Fedora build.",
+      "cacheVariables": {
+        "GNP_ENABLE_XDP": "OFF",
+        "CMAKE_CUDA_ARCHITECTURES": "75"
+      }
     }
   ],
   "buildPresets": [
     { "name": "prod", "configurePreset": "prod" },
     { "name": "dev", "configurePreset": "dev" },
-    { "name": "dev-cpu", "configurePreset": "dev-cpu" },
-    { "name": "debug", "configurePreset": "debug" }
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "gpunetio", "configurePreset": "gpunetio" }
   ],
   "testPresets": [
     { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } },
-    { "name": "dev-cpu", "configurePreset": "dev-cpu", "output": { "outputOnFailure": true } },
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } }
   ]
 }

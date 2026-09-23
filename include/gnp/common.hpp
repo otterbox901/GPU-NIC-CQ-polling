@@ -10,7 +10,7 @@
 #include <cstdint>
 
 // Mark functions that must exist on both sides. Expands to nothing when the
-// translation unit is built by the host compiler (CPU-fallback backend).
+// translation unit is built by the host compiler rather than nvcc.
 #if defined(__CUDACC__)
 #  define GNP_HD __host__ __device__
 #  define GNP_FORCEINLINE __forceinline__

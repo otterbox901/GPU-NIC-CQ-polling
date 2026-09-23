@@ -5,7 +5,7 @@
 // The ring is the single point where "how packets arrive" is decoupled from
 // "who notices they arrived". The producer is the AF_XDP ingest thread
 // (src/host/xdp_ingest.cpp), or the fake NIC in testing/sim/ during
-// development. The consumer is a CUDA kernel on an SM (or the CPU fallback).
+// development. The consumer is a persistent CUDA kernel on an SM.
 //
 
 #include "gnp/common.hpp"
@@ -79,7 +79,7 @@ struct IngestStats {
     uint64_t dropped  = 0;   ///< frames received but not published (malformed / too big)
     uint64_t start_ns = 0;
     uint64_t end_ns   = 0;
-    /// Sampled H2D flushes (CUDA backend only; zero on the CPU fallback).
+    /// Sampled H2D flushes; zero unless --copy-timing is set.
     uint64_t copy_ns_sum  = 0;  ///< producer submit -> flush complete on device
     uint64_t copy_samples = 0;  ///< flushes that contributed to copy_ns_sum
 };

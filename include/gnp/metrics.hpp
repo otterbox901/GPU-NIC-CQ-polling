@@ -8,7 +8,7 @@
 
 namespace gnp {
 
-/// Written by the poller (device or CPU fallback), read by the host at teardown.
+/// Written by the poller on the device, read by the host at teardown.
 ///
 /// `unsigned long long` throughout so the fields stay atomicAdd-compatible if
 /// the poll loop is ever widened to more than one thread.
