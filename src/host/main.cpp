@@ -6,7 +6,6 @@
 // AF_XDP RX thread feeds the ring and the poller drains it.
 //
 
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -71,16 +70,6 @@ bool parse_args(int argc, char** argv, gnp::RunConfig& cfg, gnp::XdpConfig& xdp,
     return true;
 }
 
-/// publish_limit first, then stop_flag: the poller only retires once it has
-/// consumed everything that was published, so the drain cannot be truncated.
-void retire_poller(gnp::QueueSession& qs, uint64_t produced) {
-    reinterpret_cast<std::atomic<unsigned long long>*>(&qs.ctrl->publish_limit)
-        ->store(produced, std::memory_order_release);
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    reinterpret_cast<std::atomic<uint32_t>*>(&qs.ctrl->stop_flag)
-        ->store(1u, std::memory_order_release);
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -131,7 +120,8 @@ int main(int argc, char** argv) {
     gnp::XdpIngest* ingest = gnp::xdp_ingest_start(0, host_ring, qs.ring.descs, qs.ctrl, qs.arena,
                                                    qs.arena_bytes, cfg, xdp);
     if (!ingest) {
-        retire_poller(qs, 0);
+        const gnp::IngestStats nothing_published;
+        gnp::session_retire_pollers(session, &nothing_published);
         gnp::backend_wait_poller();
         gnp::session_destroy(session);
         return 1;
@@ -149,7 +139,7 @@ int main(int argc, char** argv) {
     gnp::xdp_ingest_stop(ingest, ingest_stats);
 
     // 4. Retire the poller and report.
-    retire_poller(qs, ingest_stats.produced);
+    gnp::session_retire_pollers(session, &ingest_stats);
     const bool ok = gnp::backend_wait_poller();
 
     const gnp::PollStats poll_stats = *qs.stats;

@@ -104,11 +104,9 @@ bool backend_init(bool verbose) {
     return true;
 }
 
-void* backend_alloc_shared(size_t bytes, bool write_combined) {
+void* backend_alloc_shared(size_t bytes) {
     void* p = nullptr;
-    unsigned flags = cudaHostAllocMapped;
-    if (write_combined) flags |= cudaHostAllocWriteCombined;
-    GNP_CUDA_CHECK(cudaHostAlloc(&p, bytes, flags));
+    GNP_CUDA_CHECK(cudaHostAlloc(&p, bytes, cudaHostAllocMapped));
     return p;
 }
 

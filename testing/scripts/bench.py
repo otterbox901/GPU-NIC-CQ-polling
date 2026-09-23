@@ -15,7 +15,7 @@ polling cost shows up as poll + other = ~0.
 
 Usage:
   testing/scripts/bench.py [--gpu build/dev/testing/gnp_sim] [--cpu build/dev-cpu/testing/gnp_sim] [--runs 5]
-Then render the charts with scripts/plot_bench.py.
+Then render the charts with testing/scripts/plot_bench.py.
 """
 
 import argparse
@@ -144,12 +144,11 @@ def main():
     ap.add_argument("--gpu", default=str(ROOT / "build/dev/testing/gnp_sim"))
     ap.add_argument("--cpu", default=str(ROOT / "build/dev-cpu/testing/gnp_sim"))
     ap.add_argument("--runs", type=int, default=5)
-    ap.add_argument("--out", default=str(ROOT / "docs/bench"))
     args = ap.parse_args()
 
     for b in (args.gpu, args.cpu):
         if not os.access(b, os.X_OK):
-            sys.exit(f"missing binary: {b} (build the sim and sim-cpu presets first)")
+            sys.exit(f"missing binary: {b} (build the dev and dev-cpu presets first)")
 
     # Each CPU-fallback queue costs two spinning threads; stay within the host.
     max_q = min(5, max(1, (os.cpu_count() or 2) // 2 - 1))
@@ -165,7 +164,8 @@ def main():
     for q in queue_counts:
         plan.append(("copy", "gpu", args.gpu, q, 50000, 1024, 2000))
 
-    out_dir = Path(args.out)
+    # plot_bench.py reads this exact path, so it is fixed rather than a flag.
+    out_dir = ROOT / "docs/bench"
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "results.csv"
     bad = 0

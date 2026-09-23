@@ -210,7 +210,7 @@ a real NIC DMAs into the device CQ itself and has no copy streams.
   `--queues 1 --pps 100000`.
 - The report's top sections are the aggregate, under the same labels as a
   single-queue run: counters summed, and the producer window is the union.
-  `scripts/run_sim.sh` therefore parses N-queue runs unchanged. A per-queue
+  `testing/scripts/run_sim.sh` therefore parses N-queue runs unchanged. A per-queue
   table follows, and it matters: an aggregate can hide one straggling queue.
   For `N = 1` the output is identical to the pre-multi-queue format.
 - `service time` is omitted from the aggregate: pollers run concurrently, so
@@ -219,9 +219,9 @@ a real NIC DMAs into the device CQ itself and has no copy streams.
 
 ### Measured (GTX 1650, sm_75, 16 SMs; i7-9750H, 12 threads)
 
-All numbers come from `scripts/bench.py` (raw data in
+All numbers come from `testing/scripts/bench.py` (raw data in
 [`bench/results.csv`](bench/results.csv)). Each is the median of 5 runs, and
-every run delivered every packet with zero gaps. `scripts/plot_bench.py`
+every run delivered every packet with zero gaps. `testing/scripts/plot_bench.py`
 redraws the README charts from the same file.
 
 Unpaced, 64-entry rings: throughput scales with the queue count.
@@ -242,7 +242,7 @@ spreading the same total over 4–8 queues steadies it.
 ### GPU poller vs CPU fallback
 
 The same benchmark runs the CPU fallback: the identical loop on one host thread
-per queue. The README's first page charts the comparison. In short:
+per queue. [`docs/README.md`](README.md#gpu-polling-vs-cpu-polling) charts the comparison. In short:
 
 - **Host CPU spent polling:** 0.00 cores for the GPU poller at every queue
   count, against one full core per queue for the CPU fallback. This is measured

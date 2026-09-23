@@ -36,7 +36,7 @@ const char* backend_name();
 bool backend_init(bool verbose);
 
 /// Control/stats: memory both sides can access (pinned mapped on CUDA).
-void* backend_alloc_shared(size_t bytes, bool write_combined = false);
+void* backend_alloc_shared(size_t bytes);
 void  backend_free_shared(void* p);
 
 /// Completion ring: host staging (producer) + device-resident CQ (poller).
@@ -116,5 +116,14 @@ struct Session {
 
 bool session_create(const RunConfig& cfg, Session& out);
 void session_destroy(Session& s);
+
+/// Ask every poller to retire, once it has drained what its producer published.
+/// `ingest` holds one entry per queue, in queue order.
+///
+/// The order is the whole point: every queue's publish_limit is stored first,
+/// then one seq_cst fence, then every stop_flag. A poller only leaves the idle
+/// path once its idx has caught publish_limit, so a stop that becomes visible
+/// ahead of the last CQE cannot truncate the drain.
+void session_retire_pollers(Session& s, const IngestStats* ingest);
 
 }  // namespace gnp

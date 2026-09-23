@@ -7,7 +7,6 @@
 // testing/scripts/ drive this binary.
 //
 
-#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -65,29 +64,13 @@ bool parse_args(int argc, char** argv, gnp::RunConfig& cfg, bool& want_help) {
     return true;
 }
 
-/// Retire every poller. Per queue: publish_limit first, then stop_flag. The
-/// kernel only leaves the idle path once idx has caught publish_limit, so a
-/// stop that becomes visible before the last CQE cannot truncate the drain.
-void retire_pollers(gnp::Session& session, const std::vector<gnp::IngestStats>& sim_stats) {
-    for (size_t q = 0; q < session.queues.size(); ++q) {
-        reinterpret_cast<std::atomic<unsigned long long>*>(&session.queues[q].ctrl->publish_limit)
-            ->store(sim_stats[q].produced, std::memory_order_release);
-    }
-    std::atomic_thread_fence(std::memory_order_seq_cst);
-    for (gnp::QueueSession& q : session.queues) {
-        reinterpret_cast<std::atomic<uint32_t>*>(&q.ctrl->stop_flag)
-            ->store(1u, std::memory_order_release);
-    }
-}
-
-/// Signal every producer before joining any, so all queues stop together.
-void stop_simulators(std::vector<gnp_testing::Simulator*>& sims,
+/// Signal the first `started` producers before joining any of them, so all
+/// queues stop together. Queues that never started are left alone; their
+/// IngestStats stay zeroed, which is what "published nothing" means.
+void stop_simulators(std::vector<gnp_testing::Simulator>& sims, size_t started,
                      std::vector<gnp::IngestStats>& out) {
-    for (gnp_testing::Simulator* sim : sims) gnp_testing::sim_request_stop(sim);
-    for (size_t q = 0; q < sims.size(); ++q) {
-        gnp_testing::sim_stop(sims[q], out[q]);
-        sims[q] = nullptr;
-    }
+    for (size_t q = 0; q < started; ++q) gnp_testing::sim_request_stop(sims[q]);
+    for (size_t q = 0; q < started; ++q) gnp_testing::sim_stop(sims[q], out[q]);
 }
 
 }  // namespace
@@ -134,19 +117,17 @@ int main(int argc, char** argv) {
 
     // 2. Then one producer per queue. Each writes its own host staging; flushes
     //    copy CQEs into the device ring its poller watches.
-    std::vector<gnp_testing::Simulator*> sims(n, nullptr);
+    std::vector<gnp_testing::Simulator> sims(n);
     std::vector<gnp::IngestStats> sim_stats(n);
     for (size_t q = 0; q < n; ++q) {
         gnp::QueueSession& qs = session.queues[q];
         gnp::CompletionRing host_ring = qs.ring;
         host_ring.descs = qs.host_descs;
-        sims[q] = gnp_testing::sim_start(static_cast<uint32_t>(q), host_ring, qs.ring.descs,
-                                         qs.ctrl, qs.arena, qs.arena_bytes, cfg);
-        if (!sims[q]) {
+        if (!gnp_testing::sim_start(sims[q], static_cast<uint32_t>(q), host_ring, qs.ring.descs,
+                                    qs.ctrl, qs.arena, qs.arena_bytes, cfg)) {
             std::fprintf(stderr, "[gnp] failed to start the simulator for queue %zu\n", q);
-            sims.resize(q);  // only stop the ones that started; the rest publish 0
-            stop_simulators(sims, sim_stats);
-            retire_pollers(session, sim_stats);
+            stop_simulators(sims, q, sim_stats);  // only the ones that started
+            gnp::session_retire_pollers(session, sim_stats.data());
             gnp::backend_wait_poller();
             gnp::session_destroy(session);
             return 1;
@@ -161,10 +142,10 @@ int main(int argc, char** argv) {
 
     // Each producer flushes and waits on its queue's copy stream before its
     // thread exits, so after this every published CQE is visible to its poller.
-    stop_simulators(sims, sim_stats);
+    stop_simulators(sims, n, sim_stats);
 
     // 4. Retire the pollers, then collect per-queue results.
-    retire_pollers(session, sim_stats);
+    gnp::session_retire_pollers(session, sim_stats.data());
     const bool ok = gnp::backend_wait_poller();
 
     std::vector<gnp::PollStats> poll_stats(n);

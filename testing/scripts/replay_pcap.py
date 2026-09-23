@@ -88,7 +88,7 @@ def cmd_send(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(required=True)
 
     mk = sub.add_parser("make", help="write a sample UDP pcap")
     mk.add_argument("--out", default="udp.pcap")

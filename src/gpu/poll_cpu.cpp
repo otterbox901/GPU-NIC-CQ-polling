@@ -106,7 +106,7 @@ bool backend_init(bool verbose) {
     return true;
 }
 
-void* backend_alloc_shared(size_t bytes, bool /*write_combined*/) {
+void* backend_alloc_shared(size_t bytes) {
     return ::operator new(bytes, std::align_val_t(256), std::nothrow);
 }
 

@@ -7,7 +7,6 @@
 //
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -27,15 +26,16 @@ int g_failures = 0;
         }                                                                       \
     } while (0)
 
-gnp::CompletionRing make_ring(std::vector<gnp::CompletionDesc>& storage, uint32_t capacity,
-                              uint32_t shift) {
+/// `shift` is derived, not passed: a caller that got the pair wrong would build
+/// a ring whose index math is broken in exactly the way these tests check for.
+gnp::CompletionRing make_ring(std::vector<gnp::CompletionDesc>& storage, uint32_t capacity) {
     storage.assign(capacity, gnp::CompletionDesc{});
-    std::memset(storage.data(), 0, capacity * sizeof(gnp::CompletionDesc));
     gnp::CompletionRing r;
     r.descs = storage.data();
     r.capacity = capacity;
     r.mask = capacity - 1;
-    r.shift = shift;
+    r.shift = 0;
+    while ((1u << r.shift) < capacity) ++r.shift;
     return r;
 }
 
@@ -49,7 +49,7 @@ void test_layout() {
 
 void test_index_math() {
     std::vector<gnp::CompletionDesc> storage;
-    const gnp::CompletionRing r = make_ring(storage, 8, 3);
+    const gnp::CompletionRing r = make_ring(storage, 8);
 
     CHECK(gnp::ring_slot(r, 0) == 0);
     CHECK(gnp::ring_slot(r, 7) == 7);
@@ -68,7 +68,7 @@ void test_index_math() {
 /// poller would report phantom packets the moment it starts.
 void test_zeroed_ring_is_empty() {
     std::vector<gnp::CompletionDesc> storage;
-    const gnp::CompletionRing r = make_ring(storage, 8, 3);
+    const gnp::CompletionRing r = make_ring(storage, 8);
     for (uint64_t i = 0; i < r.capacity; ++i) {
         CHECK(!gnp::desc_ready(r.descs[gnp::ring_slot(r, i)].status,
                                gnp::ring_expected_owner(r, i)));
@@ -81,7 +81,7 @@ void test_publish_consume_wraps() {
     constexpr uint64_t kTotal = kCap * 5 + 3;  // deliberately not a whole number of passes
 
     std::vector<gnp::CompletionDesc> storage;
-    const gnp::CompletionRing r = make_ring(storage, kCap, 3);
+    const gnp::CompletionRing r = make_ring(storage, kCap);
 
     uint64_t consumed = 0;
     for (uint64_t produced = 0; produced < kTotal; ++produced) {
@@ -109,7 +109,7 @@ void test_publish_consume_wraps() {
 void test_full_ring_then_drain() {
     constexpr uint32_t kCap = 16;
     std::vector<gnp::CompletionDesc> storage;
-    const gnp::CompletionRing r = make_ring(storage, kCap, 4);
+    const gnp::CompletionRing r = make_ring(storage, kCap);
 
     for (uint64_t pass = 0; pass < 3; ++pass) {
         const uint64_t base = pass * kCap;
@@ -136,8 +136,8 @@ void test_full_ring_then_drain() {
 void test_independent_rings() {
     std::vector<gnp::CompletionDesc> storage_a;
     std::vector<gnp::CompletionDesc> storage_b;
-    const gnp::CompletionRing a = make_ring(storage_a, 8, 3);
-    const gnp::CompletionRing b = make_ring(storage_b, 16, 4);
+    const gnp::CompletionRing a = make_ring(storage_a, 8);
+    const gnp::CompletionRing b = make_ring(storage_b, 16);
 
     uint64_t produced_a = 0, consumed_a = 0;
     uint64_t produced_b = 0, consumed_b = 0;
@@ -184,7 +184,7 @@ void test_independent_rings() {
 /// run concurrently rather than back to back.
 void test_stats_aggregate() {
     gnp::PollStats q[3];
-    for (gnp::PollStats& s : q) gnp::stats_reset(s);
+    for (gnp::PollStats& s : q) s = gnp::PollStats{};
 
     q[0].packets = 10; q[0].bytes = 1000; q[0].idle_spins = 5; q[0].gaps = 0;
     q[0].run_ns = 1000;

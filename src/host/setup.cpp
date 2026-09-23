@@ -2,6 +2,7 @@
 // src/host/setup.cpp - allocate and tear down everything one run needs.
 //
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -19,8 +20,6 @@ uint64_t host_now_ns() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now().time_since_epoch())
             .count());
 }
-
-void stats_reset(PollStats& s) { std::memset(&s, 0, sizeof(s)); }
 
 namespace {
 
@@ -46,8 +45,8 @@ bool queue_create(const RunConfig& cfg, QueueSession& q) {
     }
     q.ring.descs = device_descs;
 
-    q.ctrl = static_cast<RingControl*>(backend_alloc_shared(sizeof(RingControl), false));
-    q.stats = static_cast<PollStats*>(backend_alloc_shared(sizeof(PollStats), false));
+    q.ctrl = static_cast<RingControl*>(backend_alloc_shared(sizeof(RingControl)));
+    q.stats = static_cast<PollStats*>(backend_alloc_shared(sizeof(PollStats)));
 
     q.arena_bytes = static_cast<size_t>(cfg.ring_capacity) * cfg.payload_bytes;
     q.arena = static_cast<uint8_t*>(backend_alloc_host(q.arena_bytes));
@@ -60,7 +59,7 @@ bool queue_create(const RunConfig& cfg, QueueSession& q) {
     std::memset(q.ctrl, 0, sizeof(RingControl));
     q.ctrl->publish_limit = ~0ull;
     std::memset(q.arena, 0, q.arena_bytes);
-    stats_reset(*q.stats);
+    *q.stats = PollStats{};
     return true;
 }
 
@@ -137,6 +136,20 @@ void session_destroy(Session& s) {
     for (QueueSession& q : s.queues) queue_destroy(q);
     s = Session{};
     backend_shutdown();
+}
+
+void session_retire_pollers(Session& s, const IngestStats* ingest) {
+    for (size_t q = 0; q < s.queues.size(); ++q) {
+        reinterpret_cast<std::atomic<unsigned long long>*>(&s.queues[q].ctrl->publish_limit)
+            ->store(ingest[q].produced, std::memory_order_release);
+    }
+    // One fence for the whole session, between the two phases: every
+    // publish_limit is visible before any stop_flag is.
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    for (QueueSession& q : s.queues) {
+        reinterpret_cast<std::atomic<uint32_t>*>(&q.ctrl->stop_flag)
+            ->store(1u, std::memory_order_release);
+    }
 }
 
 }  // namespace gnp

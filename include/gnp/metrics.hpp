@@ -27,8 +27,6 @@ struct PollStats {
     unsigned long long run_ns;         ///< device-side elapsed (%globaltimer) while poller ran
 };
 
-void stats_reset(PollStats& s);
-
 /// Combine per-queue stats into one aggregate. Counters are summed; run_ns is
 /// the longest-running poller, since pollers run concurrently, not back to back.
 PollStats stats_aggregate(const PollStats* poll, uint32_t n_queues);

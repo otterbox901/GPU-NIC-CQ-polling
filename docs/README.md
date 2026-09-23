@@ -15,9 +15,9 @@
 |---|---|---|
 | ring protocol | verified | `test_ring` |
 | GPU and CPU pollers | verified, 1–N queues | `run_sim.sh` sweep, benchmarks below |
-| XDP program + AF_XDP ingest | verified on veth, generic XDP | 10,000/10,000 packets, 0 gaps ([reference run](../testing/README.md#3-real-ingest-path-pcap-replay-over-veth)) |
-| native XDP on a physical NIC | **not yet tested** | needs a native-XDP NIC ([checklist](../README.md#run-on-a-nic)) |
-| XDP program + AF_XDP ingest | verified on a physical NIC, generic XDP | 9,999/9,999 packets, 0 gaps, USB Ethernet ([how](../testing/README.md#3-real-ingest-path-pcap-replay-over-veth)) |
+| AF_XDP ingest, generic XDP on veth | verified | 10,000/10,000 packets, 0 gaps ([reference run](../testing/README.md#3-real-ingest-path-pcap-replay-over-veth)) |
+| AF_XDP ingest, generic XDP on a physical NIC | verified | 9,999/9,999 packets, 0 gaps, USB Ethernet ([procedure](../testing/README.md#4-real-nic-tcpreplay-from-a-second-machine)) |
+| native (driver) XDP on a physical NIC | **not yet tested** | needs a native-XDP NIC ([checklist](../README.md#run-on-a-nic)) |
 | publish -> observe latency | **not measured** | needs a host/GPU time base this hardware does not provide ([why](#why-latency-is-not-reported)) |
 | `on_packet()` | placeholder, empty | [`packet_handler.hpp`](../include/gnp/packet_handler.hpp) |
 

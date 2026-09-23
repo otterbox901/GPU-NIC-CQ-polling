@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render docs/bench/results.csv (from scripts/bench.py) as README charts.
+"""Render docs/bench/results.csv (from testing/scripts/bench.py) as README charts.
 
 Writes a light and a dark SVG per chart into docs/img/, and prints the median
 tables used in the README. Standard library only.
@@ -216,7 +216,7 @@ def lines(theme, title, subtitle, y_label, x_title, xs, data, desc, unit=""):
 #charts
 def main():
     if not DATA.exists():
-        sys.exit(f"{DATA} not found - run scripts/bench.py first")
+        sys.exit(f"{DATA} not found - run testing/scripts/bench.py first")
     g = load()
     OUT.mkdir(parents=True, exist_ok=True)
 

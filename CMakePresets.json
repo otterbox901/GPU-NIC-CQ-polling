@@ -5,19 +5,13 @@
     {
       "name": "base",
       "hidden": true,
-      "binaryDir": "${sourceDir}/build/${presetName}",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "GNP_ENABLE_CUDA": "ON",
-        "GNP_ENABLE_XDP": "ON"
-      }
+      "binaryDir": "${sourceDir}/build/${presetName}"
     },
     {
       "name": "prod",
       "inherits": "base",
       "displayName": "Production",
-      "description": "Only gnp: AF_XDP ingest + CUDA poller (CPU poller if nvcc is missing). No testing code.",
-      "cacheVariables": { "GNP_BUILD_TESTING": "OFF" }
+      "description": "Only gnp: AF_XDP ingest + CUDA poller (CPU poller if nvcc is missing). No testing code."
     },
     {
       "name": "dev",
@@ -48,6 +42,7 @@
   ],
   "testPresets": [
     { "name": "dev", "configurePreset": "dev", "output": { "outputOnFailure": true } },
-    { "name": "dev-cpu", "configurePreset": "dev-cpu", "output": { "outputOnFailure": true } }
+    { "name": "dev-cpu", "configurePreset": "dev-cpu", "output": { "outputOnFailure": true } },
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } }
   ]
 }

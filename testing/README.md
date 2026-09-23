@@ -58,7 +58,6 @@ testing/scripts/run_sim.sh ./build/dev/testing/gnp_sim       # ~20 s
 testing/scripts/run_sim.sh ./build/dev-cpu/testing/gnp_sim
 ```
 
-
 The sweep covers paced, unpaced, bursty, jumbo, near-idle, fixed-count and
 multi-queue runs, plus rejection of too many queues. A run passes only with
 zero `packet-id gaps` and `descriptors published` == `packets observed`. The
@@ -149,7 +148,7 @@ go to the kernel stack, and the report shows `XDP program: 0 frames`.
 Any second device works as the sender. A phone tethered over USB is the least
 trouble: it appears as an ordinary interface (`ipheth`, e.g. `eth0`), and a few
 lines of Python in a terminal app send to it, so no capture or extra tool is
-needed. Run `gnp` against that interface with `--skb-mode` exactly as below.
+needed. Run `gnp` against that interface with `--skb-mode` exactly as above.
 
 **Reference run** (2026-09-18, GTX 1650, CUDA poller, generic XDP on veth):
 
@@ -211,7 +210,7 @@ because it disturbs heavily loaded runs. The results and their analysis are in
 ## Layout
 
 ```
-CMakeLists.txt          gnp_testing_sim (lib), gnp_sim, test_ring + ctest
+CMakeLists.txt          gnp_sim, test_ring + ctest
 include/gnp_testing/
   sim.hpp               sim_start / sim_request_stop / sim_stop
 sim/

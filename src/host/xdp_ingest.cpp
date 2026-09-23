@@ -276,6 +276,21 @@ void rx_loop(XdpIngest* h, uint32_t queue, CompletionRing host_ring, CompletionD
             recvfrom(fd, nullptr, 0, MSG_DONTWAIT, nullptr, nullptr);
         }
     };
+    auto has_free_slot = [&] {
+        return produced - consumed->load(std::memory_order_acquire) < host_ring.capacity;
+    };
+    // Free slots only appear after the poller advances `consumed`. Gives up
+    // once the run is stopping, but re-checks first: the poller may have freed
+    // a slot during the last spin.
+    auto wait_for_slot = [&] {
+        while (!has_free_slot()) {
+            flush();
+            ++overruns;
+            cpu_relax();
+            if (h->stop.load(std::memory_order_relaxed)) return has_free_slot();
+        }
+        return true;
+    };
 
     while (!h->stop.load(std::memory_order_relaxed)) {
         uint32_t rx_idx = 0;
@@ -300,26 +315,16 @@ void rx_loop(XdpIngest* h, uint32_t queue, CompletionRing host_ring, CompletionD
 
             const uint8_t* payload = nullptr;
             uint32_t len = 0;
-            if (!udp_payload(frame, d->len, &payload, &len) || len > slot_bytes) {
+            if (!udp_payload(frame, d->len, &payload, &len) || len > slot_bytes ||
+                !wait_for_slot()) {
                 ++dropped;
             } else {
-                // Free slots only appear after the poller advances `consumed`.
-                while (produced - consumed->load(std::memory_order_acquire) >= host_ring.capacity) {
-                    flush();
-                    ++overruns;
-                    cpu_relax();
-                    if (h->stop.load(std::memory_order_relaxed)) break;
-                }
-                if (produced - consumed->load(std::memory_order_acquire) < host_ring.capacity) {
-                    const uint64_t offset =
-                        static_cast<uint64_t>(ring_slot(host_ring, produced)) * slot_bytes;
-                    std::memcpy(arena + offset, payload, len);
-                    ring_publish(host_ring, produced, offset, len,
-                                 static_cast<uint32_t>(produced), host_now_ns());
-                    ++produced;
-                } else {
-                    ++dropped;
-                }
+                const uint64_t offset =
+                    static_cast<uint64_t>(ring_slot(host_ring, produced)) * slot_bytes;
+                std::memcpy(arena + offset, payload, len);
+                ring_publish(host_ring, produced, offset, len, static_cast<uint32_t>(produced),
+                             host_now_ns());
+                ++produced;
             }
             *xsk_ring_prod__fill_addr(&h->fill, fill_idx + i) = d->addr;
         }

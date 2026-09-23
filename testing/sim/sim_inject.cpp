@@ -41,16 +41,6 @@ inline void cpu_relax() {
 /// every burst so detection latency stays honest.
 constexpr uint32_t kFlushBatch = 32;
 
-}  // namespace
-
-struct Simulator {
-    std::thread thread;
-    std::atomic<bool> stop{false};
-    IngestStats stats;
-};
-
-namespace {
-
 void inject_loop(Simulator* sim, uint32_t queue, CompletionRing host_ring,
                  CompletionDesc* device_descs, RingControl* ctrl, uint8_t* arena, RunConfig cfg) {
     const uint32_t burst = cfg.burst ? cfg.burst : 1u;
@@ -123,34 +113,29 @@ done:
 
 }  // namespace
 
-Simulator* sim_start(uint32_t queue, const CompletionRing& host_ring, CompletionDesc* device_descs,
-                     RingControl* ctrl, uint8_t* arena, size_t arena_bytes, const RunConfig& cfg) {
-    if (!host_ring.descs || !device_descs || !ctrl || !arena) return nullptr;
-    if (arena_bytes < static_cast<size_t>(host_ring.capacity) * cfg.payload_bytes) return nullptr;
+bool sim_start(Simulator& sim, uint32_t queue, const CompletionRing& host_ring,
+               CompletionDesc* device_descs, RingControl* ctrl, uint8_t* arena, size_t arena_bytes,
+               const RunConfig& cfg) {
+    if (!host_ring.descs || !device_descs || !ctrl || !arena) return false;
+    if (arena_bytes < static_cast<size_t>(host_ring.capacity) * cfg.payload_bytes) return false;
 
-    auto* sim = new Simulator();
-    sim->thread =
-        std::thread(inject_loop, sim, queue, host_ring, device_descs, ctrl, arena, cfg);
+    sim.thread = std::thread(inject_loop, &sim, queue, host_ring, device_descs, ctrl, arena, cfg);
 #if defined(__linux__)
     // Visible in top -H and /proc/<pid>/task/*/comm; testing/scripts/bench.py uses it
     // to attribute CPU time to producers vs pollers.
     char name[16];
     std::snprintf(name, sizeof(name), "gnp-prod-%u", queue);
-    pthread_setname_np(sim->thread.native_handle(), name);
+    pthread_setname_np(sim.thread.native_handle(), name);
 #endif
-    return sim;
+    return true;
 }
 
-void sim_request_stop(Simulator* sim) {
-    if (sim) sim->stop.store(true, std::memory_order_relaxed);
-}
+void sim_request_stop(Simulator& sim) { sim.stop.store(true, std::memory_order_relaxed); }
 
-void sim_stop(Simulator* sim, IngestStats& out) {
-    if (!sim) return;
+void sim_stop(Simulator& sim, IngestStats& out) {
     sim_request_stop(sim);
-    if (sim->thread.joinable()) sim->thread.join();
-    out = sim->stats;
-    delete sim;
+    if (sim.thread.joinable()) sim.thread.join();
+    out = sim.stats;
 }
 
 }  // namespace gnp_testing

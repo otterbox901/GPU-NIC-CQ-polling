@@ -2,7 +2,6 @@
 // src/host/metrics.cpp - end-of-run reporting.
 //
 
-#include <cinttypes>
 #include <cstdio>
 
 #include "gnp/metrics.hpp"
@@ -12,8 +11,15 @@ namespace {
 
 void rule() { std::printf("  --------------------------------------------------\n"); }
 
+// Every summary row goes through one of these three. The label strings and the
+// column widths are a parsing contract: testing/scripts/run_sim.sh reads them
+// with awk by column position, testing/scripts/bench.py by regex on the label.
 void row_u64(const char* label, unsigned long long v, const char* unit = "") {
     std::printf("  %-28s %14llu %s\n", label, v, unit);
+}
+
+void row_i64(const char* label, long long v, const char* unit) {
+    std::printf("  %-28s %14lld %s\n", label, v, unit);
 }
 
 void row_f64(const char* label, double v, const char* unit) {
@@ -42,8 +48,7 @@ void report_per_queue(const PollStats* poll, const IngestStats* sim, uint32_t n_
 }  // namespace
 
 PollStats stats_aggregate(const PollStats* poll, uint32_t n_queues) {
-    PollStats a;
-    stats_reset(a);
+    PollStats a{};
     for (uint32_t q = 0; q < n_queues; ++q) {
         const PollStats& p = poll[q];
         a.packets += p.packets;
@@ -105,9 +110,11 @@ void report(const RunConfig& cfg, const PollStats* per_queue_poll, const IngestS
         row_f64("achieved rate", sim.produced / elapsed_s / 1e6, "Mpps");
     }
     if (sim.copy_samples) {
-        std::printf("  %-28s %14.3f us   (%llu flushes sampled)\n", "H2D flush, submit->done",
-                    sim.copy_ns_sum / static_cast<double>(sim.copy_samples) / 1000.0,
-                    static_cast<unsigned long long>(sim.copy_samples));
+        char note[64];
+        std::snprintf(note, sizeof(note), "us   (%llu flushes sampled)",
+                      static_cast<unsigned long long>(sim.copy_samples));
+        row_f64("H2D flush, submit->done",
+                sim.copy_ns_sum / static_cast<double>(sim.copy_samples) / 1000.0, note);
     }
     if (multi) {
         std::printf("\n  consumers (%u SM pollers combined)\n", n_queues);
@@ -147,8 +154,7 @@ void report(const RunConfig& cfg, const PollStats* per_queue_poll, const IngestS
     const long long missed =
         static_cast<long long>(sim.produced) - static_cast<long long>(poll.packets);
     if (missed != 0) {
-        std::printf("  %-28s %14lld %s\n", "NOT observed", missed,
-                    "(poller stopped before drain?)");
+        row_i64("NOT observed", missed, "(poller stopped before drain?)");
     }
 
     if (multi) report_per_queue(per_queue_poll, per_queue_sim, n_queues);

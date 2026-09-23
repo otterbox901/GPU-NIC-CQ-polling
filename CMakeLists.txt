@@ -18,6 +18,13 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(gnp_cuda)   # -> GNP_WITH_CUDA
 include(gnp_xdp)    # -> GNP_WITH_XDP
 
+# Warnings on our own C++ only: nvcc takes host flags through -Xcompiler, and
+# the CUDA headers are not -Wextra clean. Not -Werror, so a newer compiler
+# cannot break the build.
+function(gnp_set_warnings target)
+    target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra>)
+endfunction()
+
 # ---------------------------------------------------------------------------
 # gnp_core: everything except main(), shared by gnp and the testing targets.
 # ---------------------------------------------------------------------------
@@ -38,6 +45,7 @@ if(GNP_WITH_XDP)
 endif()
 
 add_library(gnp_core STATIC ${GNP_SOURCES})
+gnp_set_warnings(gnp_core)
 
 target_include_directories(gnp_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
@@ -65,6 +73,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(gnp src/host/main.cpp)
 target_link_libraries(gnp PRIVATE gnp_core)
+gnp_set_warnings(gnp)
 
 if(GNP_WITH_XDP)
     # The XDP program is BPF bytecode, loaded at run time from next to `gnp`.
